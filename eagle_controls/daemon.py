@@ -347,6 +347,8 @@ PINCH_RATIO = 0.6          # ...unless the fingers spread/closed by this fractio
 MOMENTUM_S = 0.3           # keep swallowing Windows' momentum scrolling this long
 DEFAULT_GAIN = 25.0        # wheel units per mm until calibrated
 LEARN_MIN_MM = 15.0        # calibrate only from swipes at least this long
+STALE_INPUT_S = 0.1        # touchpad reports that waited this long only update the finger count
+KICAD_CATCH_UP_S = 0.2     # wait at most this long for KiCad to catch up after a pan step
 PAN_INTERVAL_S = 1 / 60    # send at most one pan update per frame; every injected
                            # event passes through the hook, so flooding it adds lag
 PAN_SPEED = 0.3            # at sensitivity 1x, pan this fraction of Windows' own scroll speed;
@@ -377,23 +379,29 @@ class UserSettings:
 user_settings = UserSettings()
 
 
-def _initial_gain():
-    try:
-        with open(CALIBRATION, encoding="utf-8") as f:
-            return float(json.load(f)["gain"])
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    # No calibration yet: take the direction from Windows' "scrolling
-    # direction" setting (0 = the default, "down motion scrolls up").
+def windows_scroll_sign():
+    """+1 or -1 from Windows' touchpad "scrolling direction" setting, or None if unknown.
+
+    0 is Windows' default, "down motion scrolls up" (content follows the fingers).
+    """
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                             r"Software\Microsoft\Windows\CurrentVersion\PrecisionTouchPad") as k:
-            if winreg.QueryValueEx(k, "ScrollDirection")[0] != 0:
-                return -DEFAULT_GAIN
+            return 1 if winreg.QueryValueEx(k, "ScrollDirection")[0] == 0 else -1
     except OSError:
+        return None
+
+
+def _initial_gain():
+    gain = DEFAULT_GAIN
+    try:
+        with open(CALIBRATION, encoding="utf-8") as f:
+            gain = float(json.load(f)["gain"]) or DEFAULT_GAIN
+    except (OSError, ValueError, KeyError, TypeError):
         pass
-    return DEFAULT_GAIN
+    sign = windows_scroll_sign()
+    return abs(gain) * sign if sign else gain
 
 
 class Pan:
@@ -402,6 +410,8 @@ class Pan:
         # Fingers moving down by 1 mm = this many units of vertical wheel;
         # horizontal wheel uses the negated value (Windows' sign convention).
         self.gain = _initial_gain()
+        self.flip_votes = 0          # swipes in a row that suggested the other direction
+        self.momentum_ours = False   # the last gesture was ours, so swallow its momentum scrolling
         self.swallow_until = 0.0
         self.pending = threading.Event()
         self._reset()
@@ -415,6 +425,9 @@ class Pan:
         self.dx = self.dy = 0.0      # since then, for calibration
         self.last_t = None
         self.speed = ACCEL_REF_MM_S  # smoothed finger speed, mm/s
+        self.stats = {"steps": 0, "wait": [], "stale": 0, "last_motion": None, "last_send": None,
+                      "max_fingers": 0, "motion_mm": 0.0, "win_events": 0, "passed": 0,
+                      "start": time.perf_counter()}
         s = user_settings.get()
         self.sensitivity = s["pan_sensitivity"]
         self.acceleration = s["pan_acceleration"]
@@ -431,6 +444,11 @@ class Pan:
         return min(max(f, ACCEL_RANGE[0]), ACCEL_RANGE[1])
 
     def on_motion(self, dx, dy, dspread):
+        if input_age_s > STALE_INPUT_S:
+            self.stats["stale"] += 1
+            return  # we fell behind (e.g. a throttled CPU): don't replay old movement
+        self.stats["last_motion"] = time.perf_counter()
+        self.stats["motion_mm"] += (dx * dx + dy * dy) ** 0.5
         with self.lock:
             k = PAN_SPEED * self.sensitivity * self._accel_factor((dx * dx + dy * dy) ** 0.5)
             self.acc_dx += dx * k
@@ -454,19 +472,54 @@ class Pan:
                 self._flush()
 
     def on_fingers_changed(self, n):
+        self.stats["max_fingers"] = max(self.stats["max_fingers"], n)
+        if n:
+            # Fingers landing or lifting one at a time, or the touchpad briefly
+            # losing one: the gesture goes on (restarting it caused stalls).
+            self.momentum_ours = False  # fingers are down: no momentum scrolling now
+            return
         with self.lock:
+            st = self.stats
+            if DEBUG and self.state != "pan" and (st["motion_mm"] > 0 or st["win_events"]):
+                log("swipe without pan: state %s, most fingers %d, two-finger motion %.1f mm, "
+                    "%d Windows scroll events (%d passed to KiCad), %.0f ms long" % (
+                        self.state, st["max_fingers"], st["motion_mm"], st["win_events"], st["passed"],
+                        1000 * (time.perf_counter() - st["start"])))
+            if DEBUG and self.state == "pan":
+                st, now = self.stats, time.perf_counter()
+                waits = st["wait"] or [0]
+                log("pan: %d steps, KiCad wait avg %.0f / max %.0f ms, %d stale reports dropped, "
+                    "last step %.0f ms after last motion, fingers up %.0f ms after last step" % (
+                        st["steps"], 1000 * sum(waits) / len(waits), 1000 * max(waits), st["stale"],
+                        1000 * ((st["last_send"] or now) - (st["last_motion"] or now)),
+                        1000 * (now - (st["last_send"] or now))))
             self._learn()
+            self.momentum_ours = self.state == "pan"
             self._reset()
 
     def windows_wheel(self, horizontal, delta, fingers):
         """Called by the hook for a touchpad wheel event over a canvas. Returns True to swallow it."""
         with self.lock:
+            self.stats["win_events"] += 1
             if key_down(VK_CONTROL):         # Windows saw a pinch: let KiCad zoom
                 self.state = "pinch"
+                self.stats["passed"] += 1
                 return False
             if self.state == "ignore":       # gesture started outside the canvas
+                self.stats["passed"] += 1
+                return False
+            if fingers != 2 and self.state != "pan" and not self.momentum_ours:
+                # We can't see two fingers (the touchpad lost one), so we can't
+                # pan this ourselves: let Windows' own scrolling through.
+                self.stats["passed"] += 1
                 return False
             self.swallow_until = time.perf_counter() + MOMENTUM_S
+            if self.state == "pinch" and fingers == 2:
+                # Our spread test guessed pinch (fingers settling as they land
+                # look like one), but Windows sees a scroll: trust Windows.
+                if DEBUG:
+                    log("touchpad gesture: pan (Windows scrolls, not a pinch)")
+                self.state = "pan"
             if fingers == 2 and self.state != "pinch":
                 if self.state is None:
                     self.state = "pan"
@@ -502,6 +555,11 @@ class Pan:
             if events:
                 arr = (INPUT * len(events))(*events)
                 user32.SendInput(len(events), arr, ctypes.sizeof(INPUT))
+                started = time.perf_counter()
+                wait_for_kicad()
+                self.stats["steps"] += 1
+                self.stats["wait"].append(time.perf_counter() - started)
+                self.stats["last_send"] = started
             time.sleep(PAN_INTERVAL_S)
 
     def _learn(self):
@@ -514,12 +572,20 @@ class Pan:
             g = -self.win_h / self.dx
         else:
             return
+        # The direction comes from Windows' setting; a swipe only tunes the speed.
+        # Without that setting, flip only after two swipes in a row agree.
+        sign = windows_scroll_sign()
+        if sign and (g > 0) != (sign > 0):
+            return
         if (g > 0) != (self.gain > 0):
-            self.gain = g    # the scroll direction setting changed
-        else:
-            # Windows speeds fast swipes up, so one gesture may only nudge the gain.
-            g = min(max(g, self.gain / 1.5), self.gain * 1.5)
-            self.gain = 0.85 * self.gain + 0.15 * g
+            self.flip_votes += 1
+            if self.flip_votes < 2:
+                return
+            self.gain = -self.gain
+        self.flip_votes = 0
+        # Windows speeds fast swipes up, so one gesture may only nudge the gain.
+        g = min(max(g, self.gain / 1.5), self.gain * 1.5)
+        self.gain = 0.85 * self.gain + 0.15 * g
         if DEBUG:
             log("touchpad gain %.1f (gesture said %.1f)" % (self.gain, g))
         try:
@@ -541,6 +607,34 @@ touchpads = touchpad.Touchpads(pan.on_motion, pan.on_fingers_changed, log)
 last_raw_mouse_wheel = 0.0
 last_verdict = None
 last_verdict_t = 0.0
+
+
+def wait_for_kicad():
+    """Wait until KiCad's window under the cursor gets back to its message loop.
+
+    When KiCad is slow to redraw (e.g. a throttled CPU) this keeps our pan
+    steps from queueing up and panning on after the fingers stop; motion in
+    the meantime is merged into the next, bigger step.
+    """
+    pt = POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    hwnd = user32.WindowFromPoint(pt)
+    pid = w.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if hwnd and pid.value == KICAD_PID:
+        # The first ping returns once KiCad has taken the step off its queue;
+        # the second only once it has also redrawn and come back for more.
+        deadline = time.perf_counter() + KICAD_CATCH_UP_S
+        for _ in range(2):
+            left = int((deadline - time.perf_counter()) * 1000)
+            result = ULONG_PTR()
+            if left <= 0 or not user32.SendMessageTimeoutW(hwnd, 0, 0, 0, SMTO_ABORTIFHUNG,  # WM_NULL
+                                                           left, ctypes.byref(result)):
+                break
+
+
+input_age_s = 0.0  # how long the WM_INPUT being handled waited in our queue
+user32.GetMessageTime.restype = ctypes.c_long
 
 
 def _parse_raw(lparam):
@@ -574,6 +668,8 @@ def raw_input_thread():
 
     def wndproc(hwnd, msg, wparam, lparam):
         if msg == WM_INPUT:
+            global input_age_s
+            input_age_s = ((kernel32.GetTickCount() - user32.GetMessageTime()) & 0xFFFFFFFF) / 1000
             try:
                 _parse_raw(lparam)
             except Exception as e:  # never let an exception escape a WNDPROC

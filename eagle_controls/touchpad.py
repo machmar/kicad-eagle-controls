@@ -112,6 +112,7 @@ class Device:
         self.mm_x = _mm_per_unit(cap_x, 100.0)
         self.mm_y = _mm_per_unit(cap_y, 65.0)
         self.prev = {}        # contact id -> (x_mm, y_mm), last complete frame
+        self.last_pair = {}   # the last complete frame with exactly two fingers
         self.frame = {}       # contacts seen so far in the frame being assembled
         self.remaining = 0    # contacts still to come in this frame (hybrid reporting)
 
@@ -194,12 +195,14 @@ class Touchpads:
             self._finish_frame(dev)
 
     def _finish_frame(self, dev):
-        now, prev = dev.frame, dev.prev
+        now = dev.frame
         dev.prev, dev.frame = now, {}
         if len(now) != self.fingers:
             self.fingers = len(now)
             self.on_fingers_changed(self.fingers)
-            return
+        # Compare with the last frame that had the same two fingers, so a frame
+        # where the touchpad briefly reports one finger loses no movement.
+        prev, dev.last_pair = dev.last_pair, (now if len(now) == 2 else dev.last_pair if now else {})
         if len(now) == 2 and set(now) == set(prev):
             dx = sum(now[c][0] - prev[c][0] for c in now) / 2
             dy = sum(now[c][1] - prev[c][1] for c in now) / 2
