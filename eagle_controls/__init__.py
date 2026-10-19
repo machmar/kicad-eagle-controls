@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DAEMON = os.path.join(HERE, "daemon.py")
 TRACKPAD_LAYOUT = {"scroll_modifier_zoom": 308, "scroll_modifier_pan_v": 0, "horizontal_pan": True}
 TITLE = "Eagle-style controls"
-EXIT_DUPLICATE = 3  # daemon.py's exit code when another helper serves this KiCad
+MUTEX_NAME = "Local\\KiCadEagleControls_%d"  # held by daemon.py while it serves that KiCad pid
 
 
 def _python():
@@ -40,15 +40,27 @@ def _common_json():
         return None
 
 
-helper = None
+def _helper_running():
+    """Whether a helper serves this KiCad: it holds a named mutex while it runs.
+
+    Asking Windows rather than remembering the process we started keeps this
+    right when KiCad re-imports the plugin ("Refresh Plugins").
+    """
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.OpenMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.OpenMutexW(0x00100000, False, MUTEX_NAME % os.getpid())  # SYNCHRONIZE
+    if handle:
+        kernel32.CloseHandle(handle)
+    return bool(handle)
 
 
 def start_helper():
     """Start the helper unless it's already running. Returns False if it can't run here."""
-    global helper
     if sys.platform != "win32":
         return False
-    if helper and helper.poll() in (None, EXIT_DUPLICATE):
+    if _helper_running():
         return True
     python = _python()
     if not python:
@@ -57,8 +69,8 @@ def start_helper():
     args = [python, "-I", DAEMON, str(os.getpid())]
     if _common_json():
         args.append(_common_json())
-    helper = subprocess.Popen(args, cwd=HERE, close_fds=True,
-                              creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+    subprocess.Popen(args, cwd=HERE, close_fds=True,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
     return True
 
 
@@ -66,12 +78,16 @@ def _keep_helper_alive():
     """Restart the helper if it dies, for as long as KiCad runs."""
     import wx
 
-    class Watchdog(wx.Timer):
-        def Notify(self):
-            start_helper()
+    def tick():
+        start_helper()
+        sys._eagle_controls_watchdog = wx.CallLater(5000, tick)
 
-    _keep_helper_alive.timer = Watchdog()
-    _keep_helper_alive.timer.Start(5000)
+    # One watchdog per KiCad, even if the plugin is imported again: the pending
+    # call is kept on sys, which outlives plugin reloads, and replaced here.
+    old = getattr(sys, "_eagle_controls_watchdog", None)
+    if old:
+        old.Stop()
+    sys._eagle_controls_watchdog = wx.CallLater(5000, tick)
 
 
 def _trackpad_layout():
@@ -108,9 +124,13 @@ def ask_for_trackpad_layout(force=False):
     dlg.Destroy()
 
 
-CLICK_ACTIONS = [("rotate", "Rotate"), ("flip", "Flip to other side"), ("layer", "Switch layer"),
+CLICK_ACTIONS = [("rotate", "Rotate"), ("flip", "Flip to other side"),
+                 ("next_layer", "Next layer down (via while routing)"),
+                 ("layer", "Toggle layer pair (via while routing)"),
+                 ("posture", "Switch bend direction"),
+                 ("via_chooser", "Choose via layer (click again: next, left click: place)"),
                  ("off", "Nothing")]
-RIGHT_CLICK_ACTIONS = CLICK_ACTIONS[:3] + [("menu", "KiCad's context menu")]
+RIGHT_CLICK_ACTIONS = CLICK_ACTIONS[:6] + [("menu", "KiCad's context menu")]
 
 
 def show_settings():
@@ -173,26 +193,33 @@ def show_settings():
     box.Add(wheel, 0, wx.ALL, 6)
     right = choice(pnl, grid, "Right click", RIGHT_CLICK_ACTIONS, values["right_click"])
     right_drag = choice(pnl, grid, "Right click while dragging", CLICK_ACTIONS, values["right_click_drag"])
+    right_route = choice(pnl, grid, "Right click while routing", RIGHT_CLICK_ACTIONS, values["right_click_route"])
     middle = choice(pnl, grid, "Middle click", CLICK_ACTIONS, values["middle_click"])
     middle_drag = choice(pnl, grid, "Middle click while dragging", CLICK_ACTIONS, values["middle_click_drag"])
+    middle_route = choice(pnl, grid, "Middle click while routing", CLICK_ACTIONS, values["middle_click_route"])
     box.Add(grid, 0, wx.EXPAND | wx.ALL, 6)
-    box.Add(wx.StaticText(pnl, label="“Dragging” means holding the left button on a part. "
-                                     "Shift + right click always\nopens KiCad's menu. "
-                                     "Right- and middle-button drags still pan."),
+    places_via = wx.CheckBox(pnl, label="Left click in the via layer chooser also places the via")
+    places_via.SetValue(values["chooser_places_via"])
+    box.Add(places_via, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+    box.Add(wx.StaticText(pnl, label="“Dragging” means holding the left button on a part; “routing”\n"
+                                     "means the router's pencil cursor is showing. Shift + right click\n"
+                                     "always opens KiCad's menu. Right- and middle-button drags still pan."),
             0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
     # --- Keys
-    box, grid, pnl = section("KiCad hotkeys used")
-    keys = {}
-    for name, label in (("rotate", "Rotate"), ("flip", "Flip"), ("layer", "Switch layer")):
-        keys[name] = wx.TextCtrl(pnl, value=values["key_" + name], size=(120, -1))
-        grid.Add(wx.StaticText(pnl, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
-        grid.Add(keys[name], 0)
-        grid.AddSpacer(0)
-    box.Add(grid, 0, wx.EXPAND | wx.ALL, 6)
-    box.Add(wx.StaticText(pnl, label="Only change these if you rebound them in KiCad "
-                                     "(e.g. R, Shift+R, PgUp)."),
-            0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+    # The keys come from KiCad's own hotkey settings; only speak up when one
+    # that a click is set to use isn't bound there.
+    folder = os.path.dirname(_common_json() or "")
+    kicad_keys = settings.kicad_hotkeys(folder if folder else None)
+    used = {values[k] for k in ("right_click", "right_click_drag", "right_click_route",
+                                "middle_click", "middle_click_drag", "middle_click_route")}
+    unbound = [label for name, label in CLICK_ACTIONS if name in used and name in kicad_keys
+               and not kicad_keys[name]]
+    if unbound:
+        warn_keys = wx.StaticText(dlg, label="No hotkey in KiCad for: %s.\nAssign one in KiCad's "
+                                             "Preferences → Hotkeys." % ", ".join(unbound))
+        warn_keys.SetForegroundColour(wx.Colour(200, 60, 0))
+        outer.Add(warn_keys, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
 
     # --- KiCad's scroll layout
     remind = wx.CheckBox(dlg, label="Remind me when KiCad isn't using the trackpad scroll layout")
@@ -211,11 +238,11 @@ def show_settings():
         sens.SetValue(0)
         accel.SetValue(0)
         wheel.SetValue(d["wheel_zoom"])
+        places_via.SetValue(d["chooser_places_via"])
         for (_, set_), key in ((right, "right_click"), (right_drag, "right_click_drag"),
-                               (middle, "middle_click"), (middle_drag, "middle_click_drag")):
+                               (right_route, "right_click_route"), (middle, "middle_click"),
+                               (middle_drag, "middle_click_drag"), (middle_route, "middle_click_route")):
             set_(d[key])
-        for name, ctrl in keys.items():
-            ctrl.SetValue(d["key_" + name])
         remind.SetValue(True)
         update()
 
@@ -231,12 +258,7 @@ def show_settings():
     dlg.SetSizerAndFit(outer)
     dlg.CentreOnScreen()
 
-    while dlg.ShowModal() == wx.ID_OK:
-        bad = [ctrl.GetValue() for ctrl in keys.values() if not settings.valid_key(ctrl.GetValue())]
-        if bad:
-            wx.MessageBox("Not a key KiCad notation can describe: %s" % ", ".join(repr(b) for b in bad),
-                          TITLE, wx.ICON_WARNING)
-            continue
+    if dlg.ShowModal() == wx.ID_OK:
         values.update({
             "touchpad_free_pan": free_pan.GetValue(),
             "pan_sensitivity": 2 ** (sens.GetValue() / 100),
@@ -244,17 +266,17 @@ def show_settings():
             "wheel_zoom": wheel.GetValue(),
             "right_click": right[0](),
             "right_click_drag": right_drag[0](),
+            "right_click_route": right_route[0](),
             "middle_click": middle[0](),
             "middle_click_drag": middle_drag[0](),
+            "middle_click_route": middle_route[0](),
+            "chooser_places_via": places_via.GetValue(),
             "dont_ask_layout": not remind.GetValue(),
         })
-        for name, ctrl in keys.items():
-            values["key_" + name] = ctrl.GetValue().strip()
         try:
             settings.save(values)
         except OSError as e:
             wx.MessageBox("Could not save settings: %s" % e, TITLE, wx.ICON_ERROR)
-        break
     dlg.Destroy()
 
 

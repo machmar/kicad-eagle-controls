@@ -3,12 +3,13 @@
 Runs as a small helper process next to KiCad (started by the plugin in
 __init__.py) and watches input with a low-level mouse hook:
 
-  * right click on the board (Shift+right click: KiCad's menu)  -> rotate (R)
-  * middle click without moving the mouse                        -> switch layer (V),
+  * right click on the board (Shift+right click: KiCad's menu)  -> rotate (R), or bend (/) while routing
+  * middle click without moving the mouse                        -> switch layer (V; a via while routing),
                                                                     or flip (F) while dragging
-Each of these can be changed or turned off in the settings (settings.py).
   * mouse wheel                                                  -> zoom
   * touchpad two-finger swipe (any direction) / pinch            -> pan / zoom
+
+Each of these can be changed or turned off in the settings (settings.py).
 
 The wheel part relies on KiCad's "trackpad" scroll settings (plain scroll
 pans, Ctrl+scroll zooms). With those settings a real mouse wheel would pan
@@ -33,7 +34,9 @@ from ctypes import wintypes as w
 
 # --- settings -------------------------------------------------------------
 
-CLICK_SLOP_PX = 4          # middle button may move this much and still count as a click
+CLICK_SLOP = 10            # a click may move this many (96-dpi) pixels; scaled to the display in main()
+DRAG_MIN_S = 0.15          # ...and a press only becomes a drag once held this long
+CLICK_SLOP_PX = CLICK_SLOP
 CLICK_MAX_S = 0.5          # ...and must be released within this time
 WHEEL_STICKY_S = 0.35      # a scroll gesture keeps its mouse/touchpad verdict this long
 EAGLE_FRAMES = ("PCB Editor", "Footprint Editor")  # where the button remaps apply
@@ -71,7 +74,7 @@ RI_MOUSE_WHEEL = 0x0400
 GA_ROOT = 2
 SYNCHRONIZE, INFINITE = 0x00100000, 0xFFFFFFFF
 ERROR_ALREADY_EXISTS = 183
-EXIT_DUPLICATE = 3  # another helper already serves this KiCad (checked by __init__.py)
+EXIT_DUPLICATE = 3  # another helper already serves this KiCad
 
 # Tag on everything we inject, so the hook lets our own events through.
 MAGIC = 0x4541474C  # "EAGL"
@@ -141,12 +144,31 @@ kernel32.OpenProcess.restype = w.HANDLE
 kernel32.CreateMutexW.restype = w.HANDLE
 
 
+# Windows silently removes a low-level hook that is slow to return, so nothing
+# the hook calls may wait on the disk: log lines are written by a thread.
+_log_queue = queue.Queue()
+
+
 def log(msg):
-    try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write("%s [%d] %s\n" % (time.strftime("%H:%M:%S"), os.getpid(), msg))
-    except OSError:
-        pass
+    _log_queue.put("%s [%d] %s\n" % (time.strftime("%H:%M:%S"), os.getpid(), msg))
+
+
+def flush_log():
+    lines = []
+    while not _log_queue.empty():
+        lines.append(_log_queue.get())
+    if lines:
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.writelines(lines)
+        except OSError:
+            pass
+
+
+def log_writer():
+    while True:
+        _log_queue.put(_log_queue.get())  # wait for a line, then write everything queued
+        flush_log()
 
 
 def key_down(vk):
@@ -196,7 +218,7 @@ NAMED_KEYS = {"pgup": 0x21, "pgdn": 0x22, "end": 0x23, "home": 0x24, "left": 0x2
               "escape": 0x1B, "return": 0x0D, "enter": 0x0D}
 NAMED_KEYS.update({"f%d" % n: 0x6F + n for n in range(1, 25)})
 MODIFIER_KEYS = {"shift": VK_SHIFT, "ctrl": VK_CONTROL, "alt": VK_MENU}
-KEY_ACTIONS = ("rotate", "flip", "layer")
+KEY_ACTIONS = ("rotate", "flip", "layer", "next_layer", "posture", "via_chooser")
 _parsed_keys = {}
 
 
@@ -228,9 +250,14 @@ def parse_key(text):
     return vks, scan & 0xFF
 
 
-def do_action(action):
-    """Press the KiCad hotkey configured for "rotate", "flip" or "layer"."""
-    text = user_settings.get().get("key_" + action, "")
+def do_action(action, trigger):
+    """Press KiCad's hotkey for one of KEY_ACTIONS."""
+    text = kicad_keys.get(action, "")
+    if DEBUG:
+        log("%s -> %s (%s)" % (trigger, action, text))
+    if not text:
+        log("%s has no hotkey in KiCad (Preferences > Hotkeys)" % action)
+        return
     if text not in _parsed_keys:
         _parsed_keys[text] = parse_key(text)
         if _parsed_keys[text] is None:
@@ -260,16 +287,37 @@ def zoom_wheel(delta):
 TRACKPAD_LAYOUT = {"scroll_modifier_zoom": 308, "scroll_modifier_pan_v": 0, "horizontal_pan": True}
 COMMON_JSON = None
 _layout_ok = False
-_layout_checked = 0.0
 _layout_mtime = None
 
 
 def trackpad_layout():
-    global _layout_ok, _layout_checked, _layout_mtime
-    now = time.perf_counter()
-    if now - _layout_checked < 1.0 or not COMMON_JSON:
-        return _layout_ok
-    _layout_checked = now
+    return _layout_ok
+
+
+# The keys KiCad has bound for our actions, kept current by refresher().
+kicad_keys = settings.kicad_hotkeys(None)
+_hotkeys_mtime = None
+
+
+def _refresh_hotkeys():
+    global kicad_keys, _hotkeys_mtime
+    if not COMMON_JSON:
+        return
+    folder = os.path.dirname(COMMON_JSON)
+    try:
+        mtime = os.path.getmtime(settings.hotkeys_path(folder))
+    except OSError:
+        mtime = None
+    if mtime != _hotkeys_mtime:
+        _hotkeys_mtime = mtime
+        kicad_keys = settings.kicad_hotkeys(folder)
+        log("KiCad hotkeys: %s" % kicad_keys)
+
+
+def _refresh_layout():
+    global _layout_ok, _layout_mtime
+    if not COMMON_JSON:
+        return
     try:
         mtime = os.path.getmtime(COMMON_JSON)
         if mtime != _layout_mtime:
@@ -280,7 +328,6 @@ def trackpad_layout():
             log("KiCad scroll layout is %s" % ("trackpad" if _layout_ok else "not trackpad, wheel left alone"))
     except (OSError, ValueError) as e:
         log("can't read %s: %r" % (COMMON_JSON, e))
-    return _layout_ok
 
 
 # --- touchpad panning -----------------------------------------------------
@@ -298,6 +345,7 @@ PAN_START_MM = 1.0         # finger travel before a gesture counts as a pan...
 PINCH_RATIO = 0.6          # ...unless the fingers spread/closed by this fraction of it
 MOMENTUM_S = 0.3           # keep swallowing Windows' momentum scrolling this long
 DEFAULT_GAIN = 25.0        # wheel units per mm until calibrated
+LEARN_MIN_MM = 15.0        # calibrate only from swipes at least this long
 PAN_INTERVAL_S = 1 / 60    # send at most one pan update per frame; every injected
                            # event passes through the hook, so flooding it adds lag
 ACCEL_REF_MM_S = 30.0      # with acceleration on, finger speed that pans at 1x
@@ -305,20 +353,22 @@ ACCEL_RANGE = (0.25, 4.0)  # limits of the acceleration factor
 
 
 class UserSettings:
-    """settings.py values, reloaded when the plugin's settings dialog saves them."""
+    """settings.py values, reloaded by refresher() when the settings dialog saves them."""
 
     def __init__(self):
         self.mtime = None
-        self.values = settings.DEFAULTS
+        self.values = settings.load()
 
     def get(self):
+        return self.values
+
+    def refresh(self):
         try:
             mtime = os.path.getmtime(settings.PATH)
         except OSError:
             mtime = None
         if mtime != self.mtime:
             self.mtime, self.values = mtime, settings.load()
-        return self.values
 
 
 user_settings = UserSettings()
@@ -453,13 +503,20 @@ class Pan:
 
     def _learn(self):
         """Compare the finger travel with what Windows sent for it."""
-        if abs(self.dy) > 5 and abs(self.win_v) >= 120 and abs(self.dy) > 2 * abs(self.dx):
+        # Only longer, mostly straight swipes: in short ones Windows' first events
+        # also cover the travel before it recognised the gesture.
+        if abs(self.dy) > LEARN_MIN_MM and abs(self.win_v) >= 120 and abs(self.dy) > 2 * abs(self.dx):
             g = self.win_v / self.dy
-        elif abs(self.dx) > 5 and abs(self.win_h) >= 120 and abs(self.dx) > 2 * abs(self.dy):
+        elif abs(self.dx) > LEARN_MIN_MM and abs(self.win_h) >= 120 and abs(self.dx) > 2 * abs(self.dy):
             g = -self.win_h / self.dx
         else:
             return
-        self.gain = g if (g > 0) != (self.gain > 0) else 0.7 * self.gain + 0.3 * g
+        if (g > 0) != (self.gain > 0):
+            self.gain = g    # the scroll direction setting changed
+        else:
+            # Windows speeds fast swipes up, so one gesture may only nudge the gain.
+            g = min(max(g, self.gain / 1.5), self.gain * 1.5)
+            self.gain = 0.85 * self.gain + 0.15 * g
         if DEBUG:
             log("touchpad gain %.1f (gesture said %.1f)" % (self.gain, g))
         try:
@@ -506,6 +563,7 @@ def _parse_raw(lparam):
     delta = int.from_bytes(buf.raw[hdr + 6:hdr + 8], "little", signed=True)
     if flags & RI_MOUSE_WHEEL and delta % 120 == 0:
         last_raw_mouse_wheel = time.perf_counter()
+    hook_watch.last_mouse = time.perf_counter()
 
 
 def raw_input_thread():
@@ -553,8 +611,40 @@ def classify_wheel(delta, injected):
 KICAD_PID = 0
 middle = None          # (x, y, time, action) of a middle press on the board, until it moves
 swallow_right_up = False
-right_pending = None   # (x, y, action) of a held-back right press: act on release, or pan if it moves
+right_pending = None   # (x, y, time, action) of a held-back right press: act on release, or pan if it moves
 left_down = False      # tracked here: GetAsyncKeyState can miss it from another process
+swallow_up = None      # button-up message to swallow because we took its button-down
+
+
+GWL_STYLE, WS_CAPTION = -16, 0x00C00000
+user32.GetWindowLongW.argtypes = [w.HWND, ctypes.c_int]
+user32.GetWindowLongW.restype = ctypes.c_long
+user32.GetWindowRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
+EnumChildProc = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
+user32.EnumChildWindows.argtypes = [w.HWND, EnumChildProc, w.LPARAM]
+user32.IsWindowVisible.argtypes = [w.HWND]
+
+
+def _canvas_kind(canvas):
+    title = window_text(user32.GetAncestor(canvas, GA_ROOT))
+    return "board" if any(f in title for f in EAGLE_FRAMES) else "canvas"
+
+
+def _canvas_below(frame, pt):
+    """The visible KiCad canvas of `frame` under pt, if any."""
+    found = []
+
+    def check(child, _):
+        r = w.RECT()
+        if (class_name(child) == "wxGLCanvas" and user32.IsWindowVisible(child)
+                and user32.GetWindowRect(child, ctypes.byref(r))
+                and r.left <= pt.x < r.right and r.top <= pt.y < r.bottom):
+            found.append(child)
+            return False
+        return True
+
+    user32.EnumChildWindows(frame, EnumChildProc(check), 0)
+    return found[0] if found else None
 
 
 def target(pt):
@@ -564,10 +654,50 @@ def target(pt):
         return None
     pid = w.DWORD()
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    if pid.value != KICAD_PID or class_name(hwnd) != "wxGLCanvas":
+    if pid.value != KICAD_PID:
         return None
-    title = window_text(user32.GetAncestor(hwnd, GA_ROOT))
-    return "board" if any(f in title for f in EAGLE_FRAMES) else "canvas"
+    if class_name(hwnd) == "wxGLCanvas":
+        return _canvas_kind(hwnd)
+    # KiCad puts things over the canvas: overlays inside the editor window
+    # (e.g. while routing) and little popups such as the hotkey feedback
+    # ("Layer: B.Cu") next to the cursor. Look through them to the canvas
+    # area. Dialogs (captioned), menus and drop-down lists (not wx classes)
+    # still count as "not the board", as do toolbars and side panels, which
+    # lie outside the canvas.
+    root = user32.GetAncestor(hwnd, GA_ROOT)
+    style = user32.GetWindowLongW(root, GWL_STYLE) & 0xFFFFFFFF
+    canvas = _canvas_below(root, pt)              # an overlay inside the editor window
+    if not canvas and not style & WS_CAPTION and class_name(root).startswith("wx"):
+        canvas = _kicad_canvas_under(pt, skip=root)  # a caption-less popup on top of it
+    if DEBUG:
+        log("%r in %r (%r, style %08x) over the canvas area: %s" % (
+            class_name(hwnd), class_name(root), window_text(root), style, "board" if canvas else "not the board"))
+    return _canvas_kind(canvas) if canvas else None
+
+
+EnumWindowsProc = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
+user32.EnumWindows.argtypes = [EnumWindowsProc, w.LPARAM]
+
+
+def _kicad_canvas_under(pt, skip):
+    """The canvas under pt of the topmost KiCad window with a title bar there."""
+    found = []
+
+    def check(top, _):
+        if top == skip or not user32.IsWindowVisible(top):
+            return True
+        pid = w.DWORD()
+        user32.GetWindowThreadProcessId(top, ctypes.byref(pid))
+        r = w.RECT()
+        if (pid.value != KICAD_PID or not user32.GetWindowLongW(top, GWL_STYLE) & WS_CAPTION
+                or not user32.GetWindowRect(top, ctypes.byref(r))
+                or not (r.left <= pt.x < r.right and r.top <= pt.y < r.bottom)):
+            return True
+        found.append(_canvas_below(top, pt))  # windows come topmost first; stop at the first
+        return False
+
+    user32.EnumWindows(EnumWindowsProc(check), 0)
+    return found[0] if found else None
 
 
 def right_down_injected():
@@ -580,13 +710,357 @@ def modifiers_held():
     return key_down(VK_SHIFT) or key_down(VK_CONTROL) or key_down(VK_MENU)
 
 
+def is_drag(press, pt):
+    """Whether a press at (x, y, time, ...) has turned into a drag now that the mouse is at pt."""
+    moved = abs(pt.x - press[0]) > CLICK_SLOP_PX or abs(pt.y - press[1]) > CLICK_SLOP_PX
+    return moved and time.perf_counter() - press[2] >= DRAG_MIN_S
+
+
 def dragging():
     return left_down or key_down(VK_LBUTTON)
 
 
+# --- is the router active? -------------------------------------------------
+# KiCad doesn't tell other processes which tool is active, but the router
+# shows a pencil cursor, and it's the only board cursor whose hotspot (the
+# pencil tip) is in the bottom-left corner. Arrows have it top-left, the move
+# and placement cursors in the middle.
+
+class CURSORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", w.DWORD), ("flags", w.DWORD), ("hCursor", w.HANDLE), ("pt", POINT)]
+
+
+class ICONINFO(ctypes.Structure):
+    _fields_ = [("fIcon", w.BOOL), ("xHotspot", w.DWORD), ("yHotspot", w.DWORD),
+                ("hbmMask", w.HBITMAP), ("hbmColor", w.HBITMAP)]
+
+
+class BITMAP(ctypes.Structure):
+    _fields_ = [("bmType", ctypes.c_long), ("bmWidth", ctypes.c_long), ("bmHeight", ctypes.c_long),
+                ("bmWidthBytes", ctypes.c_long), ("bmPlanes", w.WORD), ("bmBitsPixel", w.WORD),
+                ("bmBits", ctypes.c_void_p)]
+
+
+gdi32 = ctypes.WinDLL("gdi32")
+gdi32.DeleteObject.argtypes = [w.HANDLE]
+gdi32.GetObjectW.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p]
+user32.GetIconInfo.argtypes = [w.HANDLE, ctypes.POINTER(ICONINFO)]
+_cursor_shapes = {}  # cursor handle -> (hotspot x, y, width, height)
+
+
+def cursor_shape():
+    ci = CURSORINFO(cbSize=ctypes.sizeof(CURSORINFO))
+    if not user32.GetCursorInfo(ctypes.byref(ci)) or not ci.hCursor:
+        return None
+    if ci.hCursor not in _cursor_shapes:
+        ii = ICONINFO()
+        if not user32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
+            return None
+        bm = BITMAP()
+        gdi32.GetObjectW(ii.hbmMask, ctypes.sizeof(bm), ctypes.byref(bm))
+        height = bm.bmHeight if ii.hbmColor else bm.bmHeight // 2  # monochrome: AND and XOR masks stacked
+        for hbm in (ii.hbmMask, ii.hbmColor):
+            if hbm:
+                gdi32.DeleteObject(hbm)
+        _cursor_shapes[ci.hCursor] = (ii.xHotspot, ii.yHotspot, bm.bmWidth, height)
+    return _cursor_shapes[ci.hCursor]
+
+
+def routing():
+    shape = cursor_shape()
+    if DEBUG:
+        log("cursor hotspot/size: %s" % (shape,))
+    if not shape or not shape[2] or not shape[3]:
+        return False
+    x, y, width, height = shape
+    return x < 0.3 * width and y > 0.6 * height
+
+
+# --- via layer chooser ----------------------------------------------------
+# Eagle-style via placement while routing. A middle click opens KiCad's own
+# "Select Layer and Place Through Via" chooser (always a through via, never
+# blind/buried). KiCad's chooser only reacts to clicks on its rows, so we
+# draw our own highlight over it: further middle clicks move the highlight
+# one copper layer down, and a left click anywhere clicks the highlighted
+# row for the user. Esc still cancels it as usual.
+#
+# The copper layers and the active layer are read from the layer drop-down
+# in KiCad's toolbar; the chooser lists the same copper layers, top to
+# bottom, one row each.
+
+WM_APP_CHOOSER_OPEN, WM_APP_CHOOSER_STEP, WM_APP_CHOOSER_PICK = 0x8011, 0x8012, 0x8013
+WM_TIMER, WM_LBUTTONDOWN_MSG, WM_LBUTTONUP_MSG, MK_LBUTTON = 0x0113, 0x0201, 0x0202, 0x0001
+CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXTLEN, CB_GETLBTEXT = 0x0146, 0x0147, 0x0149, 0x0148
+SMTO_ABORTIFHUNG = 0x0002
+WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST = 0x00080000, 0x00000020, 0x00000008
+WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x00000080, 0x08000000
+LWA_ALPHA = 0x2
+SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE = 0x0010, 0x0040, 0
+HWND_TOPMOST = w.HWND(-1)
+MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
+CHOOSER_WAIT_S = 1.5
+CHOOSER_HIGHLIGHT_RGB = (0, 120, 215)
+# Fixed names of KiCad's technical layers; the copper layers come before them.
+TECHNICAL_LAYERS = {"F.Adhesive", "B.Adhesive", "F.Paste", "B.Paste", "F.Silkscreen", "B.Silkscreen",
+                    "F.Mask", "B.Mask", "Dwgs.User", "Cmts.User", "Eco1.User", "Eco2.User",
+                    "Edge.Cuts", "Margin", "F.Courtyard", "B.Courtyard", "F.Fab", "B.Fab"}
+
+user32.SendMessageTimeoutW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM, w.UINT, w.UINT,
+                                       ctypes.POINTER(ULONG_PTR)]
+user32.SendMessageTimeoutW.restype = LRESULT
+user32.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
+user32.ScreenToClient.argtypes = [w.HWND, ctypes.POINTER(POINT)]
+user32.IsWindow.argtypes = [w.HWND]
+user32.SetWindowPos.argtypes = [w.HWND, w.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, w.UINT]
+user32.ShowWindow.argtypes = [w.HWND, ctypes.c_int]
+user32.SetLayeredWindowAttributes.argtypes = [w.HWND, w.DWORD, ctypes.c_ubyte, w.DWORD]
+user32.SetTimer.argtypes = [w.HWND, ULONG_PTR, w.UINT, ctypes.c_void_p]
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+gdi32.CreateSolidBrush.argtypes = [w.DWORD]
+gdi32.CreateSolidBrush.restype = w.HBRUSH
+
+
+def _send_timeout(hwnd, msg, wparam, lparam):
+    """SendMessage that gives up if KiCad is busy, so this thread never hangs."""
+    result = ULONG_PTR()
+    if not user32.SendMessageTimeoutW(hwnd, msg, wparam, lparam, SMTO_ABORTIFHUNG, 300, ctypes.byref(result)):
+        return None
+    return ctypes.c_ssize_t(result.value).value
+
+
+def _kicad_children(parent, wanted):
+    """Descendant windows of parent for which wanted(hwnd) is true."""
+    found = []
+
+    def check(child, _):
+        if wanted(child):
+            found.append(child)
+        return True
+
+    user32.EnumChildWindows(parent, EnumChildProc(check), 0)
+    return found
+
+
+def _kicad_tops():
+    tops = []
+
+    def check(top, _):
+        pid = w.DWORD()
+        user32.GetWindowThreadProcessId(top, ctypes.byref(pid))
+        if pid.value == KICAD_PID and user32.IsWindowVisible(top):
+            tops.append(top)
+        return True
+
+    user32.EnumWindows(EnumWindowsProc(check), 0)
+    return tops
+
+
+def read_copper_layers():
+    """(copper layer names top to bottom, index of the active one) from the toolbar, or None."""
+    for frame in _kicad_tops():
+        if not any(f in window_text(frame) for f in EAGLE_FRAMES):
+            continue
+        for combo in _kicad_children(frame, lambda h: class_name(h) == "ComboBox"):
+            count = _send_timeout(combo, CB_GETCOUNT, 0, 0)
+            if not count or count <= 0 or count > 200:
+                continue
+            names = []
+            for i in range(count):
+                length = _send_timeout(combo, CB_GETLBTEXTLEN, i, 0)
+                if length is None or length < 0:
+                    break
+                buf = ctypes.create_unicode_buffer(length + 2)
+                _send_timeout(combo, CB_GETLBTEXT, i, ctypes.addressof(buf))
+                names.append(buf.value.split(" (")[0])  # "F.Cu (PgUp)" -> "F.Cu"
+            technical = [i for i, n in enumerate(names) if n in TECHNICAL_LAYERS]
+            if not technical or technical[0] < 2:
+                continue  # not the layer selector
+            copper = names[:technical[0]]
+            active = _send_timeout(combo, CB_GETCURSEL, 0, 0)
+            return copper, active if active is not None and 0 <= active < len(copper) else None
+    return None
+
+
+def find_layer_chooser():
+    """(dialog, grid window) of KiCad's open layer chooser, or None."""
+    for top in _kicad_tops():
+        if user32.GetWindowLongW(top, GWL_STYLE) & WS_CAPTION:
+            grids = _kicad_children(top, lambda h: window_text(h) == "GridWindow"
+                                    and user32.IsWindowVisible(h))
+            if len(grids) == 1 and not any(f in window_text(top) for f in EAGLE_FRAMES):
+                return top, grids[0]
+    return None
+
+
+def _left_click():
+    """A left click at the cursor, tagged so our own hook ignores it."""
+    down, up = INPUT(type=INPUT_MOUSE), INPUT(type=INPUT_MOUSE)
+    down.u.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, MAGIC)
+    up.u.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, MAGIC)
+    arr = (INPUT * 2)(down, up)
+    user32.SendInput(2, arr, ctypes.sizeof(INPUT))
+
+
+class LayerChooser:
+    def __init__(self):
+        self.open = False        # read by the hook
+        self.thread_id = None
+        self.dialog = self.grid = None
+        self.rows = 0
+        self.active = None
+        self.index = 0
+        self.names = []
+
+    def request(self, msg):
+        if self.thread_id:
+            user32.PostThreadMessageW(self.thread_id, msg, 0, 0)
+
+    def run(self):
+        self.thread_id = kernel32.GetCurrentThreadId()
+        self.overlay = self._make_overlay()
+        user32.SetTimer(None, 0, 100, None)  # check whether the chooser is still open
+        msg = w.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            try:
+                if msg.message == WM_APP_CHOOSER_OPEN:
+                    self._open()
+                elif msg.message == WM_APP_CHOOSER_STEP:
+                    self._step()
+                elif msg.message == WM_APP_CHOOSER_PICK:
+                    self._pick()
+                elif msg.message == WM_TIMER and self.open:
+                    if not (user32.IsWindow(self.dialog) and user32.IsWindowVisible(self.dialog)):
+                        self._close()
+            except Exception as e:
+                log("layer chooser error: %r" % e)
+                self._close()
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+    def _make_overlay(self):
+        hinst = kernel32.GetModuleHandleW(None)
+        self.wndproc = WNDPROC(lambda h, m, wp, lp: user32.DefWindowProcW(h, m, wp, lp))
+        r, g, b = CHOOSER_HIGHLIGHT_RGB
+        wc = WNDCLASSW(lpfnWndProc=self.wndproc, hInstance=hinst, lpszClassName="KiCadEagleControlsHighlight",
+                       hbrBackground=gdi32.CreateSolidBrush(r | g << 8 | b << 16))
+        user32.RegisterClassW(ctypes.byref(wc))
+        hwnd = user32.CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            wc.lpszClassName, "", 0x80000000, 0, 0, 0, 0, None, None, hinst, None)  # WS_POPUP
+        user32.SetLayeredWindowAttributes(hwnd, 0, 110, LWA_ALPHA)
+        return hwnd
+
+    def _open(self):
+        layers = read_copper_layers()
+        do_action("via_chooser", "middle click while routing")
+        if not layers:
+            log("layer chooser: can't read the copper layers; no highlight")
+            return
+        self.names, self.active = layers
+        deadline = time.perf_counter() + CHOOSER_WAIT_S
+        found = None
+        while not found and time.perf_counter() < deadline:
+            time.sleep(0.03)
+            found = find_layer_chooser()
+        if not found:
+            log("layer chooser didn't appear")
+            return
+        self.dialog, self.grid = found
+        self.rows = len(self.names)
+        self.index = self.active if self.active is not None else -1
+        self.open = True
+        self._step()  # start on the next layer down from the active one
+        if DEBUG:
+            log("layer chooser open: %s, active %s" % (self.names, self.active))
+
+    def _row_rect(self):
+        r = w.RECT()
+        user32.GetWindowRect(self.grid, ctypes.byref(r))
+        row_h = (r.bottom - r.top) / self.rows
+        top = round(r.top + self.index * row_h)
+        return r.left, top, r.right - r.left, round(r.top + (self.index + 1) * row_h) - top
+
+    def _step(self):
+        if not self.open:
+            return
+        for _ in range(self.rows):
+            self.index = (self.index + 1) % self.rows
+            if self.index != self.active:
+                break
+        x, y, width, height = self._row_rect()
+        user32.SetWindowPos(self.overlay, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW)
+
+    def _pick(self):
+        if not self.open:
+            return
+        x, y, width, height = self._row_rect()
+        pt = POINT(x + width // 2, y + height // 2)
+        if DEBUG:
+            log("layer chooser: picking %s" % self.names[self.index])
+        user32.ShowWindow(self.overlay, SW_HIDE)
+        client = POINT(pt.x, pt.y)
+        user32.ScreenToClient(self.grid, ctypes.byref(client))
+        lparam = (client.y & 0xFFFF) << 16 | (client.x & 0xFFFF)
+        user32.PostMessageW(self.grid, WM_LBUTTONDOWN_MSG, MK_LBUTTON, lparam)
+        user32.PostMessageW(self.grid, WM_LBUTTONUP_MSG, 0, lparam)
+        deadline = time.perf_counter() + 0.4
+        while time.perf_counter() < deadline and user32.IsWindowVisible(self.dialog):
+            time.sleep(0.02)
+        if user32.IsWindowVisible(self.dialog):
+            # The grid ignored posted clicks: click the row for real, then put the cursor back.
+            back = POINT()
+            user32.GetCursorPos(ctypes.byref(back))
+            user32.SetCursorPos(pt.x, pt.y)
+            _left_click()
+            time.sleep(0.05)
+            user32.SetCursorPos(back.x, back.y)
+        picked = not user32.IsWindowVisible(self.dialog)
+        self._close()
+        if picked and user_settings.get()["chooser_places_via"]:
+            # KiCad now has the via on the end of the trace; the click that
+            # confirmed the layer also places it, where the cursor is.
+            time.sleep(0.1)
+            _left_click()
+
+    def _close(self):
+        self.open = False
+        if getattr(self, "overlay", None):
+            user32.ShowWindow(self.overlay, SW_HIDE)
+
+
+chooser = LayerChooser()
+
+
+def perform(action, trigger):
+    """Carry out a click action: press its hotkey, or run the via layer chooser."""
+    if action == "via_chooser":
+        chooser.request(WM_APP_CHOOSER_OPEN)
+    else:
+        do_action(action, trigger)
+
+
+def click_action(s, button):
+    """The configured action for a right/middle click in the current situation."""
+    if dragging():
+        return s[button + "_drag"]
+    if routing():
+        return s[button + "_route"]
+    return s[button]
+
+
 def handle(msg, info):
     """Return True to swallow the event."""
-    global middle, swallow_right_up, right_pending, left_down
+    global middle, swallow_right_up, right_pending, left_down, swallow_up
+
+    # While our highlight is over KiCad's via layer chooser, a left click picks
+    # the highlighted layer and a middle click moves the highlight.
+    if chooser.open and msg in (WM_LBUTTONDOWN, WM_MBUTTONDOWN):
+        chooser.request(WM_APP_CHOOSER_PICK if msg == WM_LBUTTONDOWN else WM_APP_CHOOSER_STEP)
+        swallow_up = msg + 1  # the matching button-up message
+        return True
+    if msg == swallow_up:
+        swallow_up = None
+        return True
 
     if msg == WM_LBUTTONDOWN:
         left_down = True
@@ -597,10 +1071,9 @@ def handle(msg, info):
         return False
 
     if msg == WM_MOUSEMOVE:
-        if middle and (abs(info.pt.x - middle[0]) > CLICK_SLOP_PX or abs(info.pt.y - middle[1]) > CLICK_SLOP_PX):
+        if middle and is_drag(middle, info.pt):
             middle = None  # it's a pan drag, leave it to KiCad
-        if right_pending and (abs(info.pt.x - right_pending[0]) > CLICK_SLOP_PX
-                              or abs(info.pt.y - right_pending[1]) > CLICK_SLOP_PX):
+        if right_pending and is_drag(right_pending, info.pt):
             right_pending = None  # a right drag: give KiCad the press after all, so it pans
             outbox.put([right_down_injected()])
         return False
@@ -608,18 +1081,14 @@ def handle(msg, info):
     if msg == WM_RBUTTONDOWN:
         if target(info.pt) != "board":
             return False
-        s = user_settings.get()
-        if dragging():
-            action = s["right_click_drag"]
-            if action not in KEY_ACTIONS:
-                return False
-            do_action(action)
-            swallow_right_up = True
-            return True
-        action = s["right_click"]
+        action = click_action(user_settings.get(), "right_click")
         if action not in KEY_ACTIONS or modifiers_held():
             return False                          # e.g. Shift+right click: KiCad's menu
-        right_pending = (info.pt.x, info.pt.y, action)  # decided on release or movement
+        if dragging():
+            perform(action, "right click while dragging")
+            swallow_right_up = True
+            return True
+        right_pending = (info.pt.x, info.pt.y, time.perf_counter(), action)  # decided on release or movement
         return True
 
     if msg == WM_RBUTTONUP:
@@ -627,7 +1096,7 @@ def handle(msg, info):
             swallow_right_up = False
             return True
         if right_pending:
-            do_action(right_pending[2])
+            perform(right_pending[3], "right click")
             right_pending = None
             return True
         return False
@@ -635,15 +1104,14 @@ def handle(msg, info):
     if msg == WM_MBUTTONDOWN:
         middle = None
         if target(info.pt) == "board":
-            s = user_settings.get()
-            action = s["middle_click_drag"] if dragging() else s["middle_click"]
+            action = click_action(user_settings.get(), "middle_click")
             if action in KEY_ACTIONS:
                 middle = (info.pt.x, info.pt.y, time.perf_counter(), action)
         return False
 
     if msg == WM_MBUTTONUP:
         if middle and time.perf_counter() - middle[2] < CLICK_MAX_S:
-            do_action(middle[3])
+            perform(middle[3], "middle click")
         middle = None
         return False
 
@@ -670,6 +1138,7 @@ def handle(msg, info):
 
 
 def hook_proc(code, wparam, lparam):
+    hook_watch.last_call = time.perf_counter()
     if code == 0:
         info = MSLLHOOKSTRUCT.from_address(lparam)
         if info.dwExtraInfo != MAGIC:
@@ -681,12 +1150,69 @@ def hook_proc(code, wparam, lparam):
     return user32.CallNextHookEx(None, code, wparam, lparam)
 
 
+WM_APP_REHOOK = 0x8001
+THREAD_PRIORITY_TIME_CRITICAL = 15
+ABOVE_NORMAL_PRIORITY_CLASS = 0x8000
+HOOK_SILENT_S = 0.5        # mouse moved but the hook wasn't called for this long: it's gone
+
+
+class HookWatch:
+    def __init__(self):
+        self.last_call = self.last_mouse = time.perf_counter()
+        self.thread_id = None
+        self.last_report = 0.0
+
+
+hook_watch = HookWatch()
+user32.UnhookWindowsHookEx.argtypes = [w.HHOOK]
+kernel32.GetCurrentThread.restype = w.HANDLE
+kernel32.GetCurrentProcess.restype = w.HANDLE
+kernel32.SetThreadPriority.argtypes = [w.HANDLE, ctypes.c_int]
+kernel32.SetPriorityClass.argtypes = [w.HANDLE, w.DWORD]
+user32.PostThreadMessageW.argtypes = [w.DWORD, w.UINT, w.WPARAM, w.LPARAM]
+
+
 def hook_thread():
+    # Get scheduled promptly even when KiCad keeps the CPU busy.
+    kernel32.SetThreadPriority(kernel32.GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL)
     hook_thread.proc = HOOKPROC(hook_proc)  # keep a reference
-    if not user32.SetWindowsHookExW(WH_MOUSE_LL, hook_thread.proc, kernel32.GetModuleHandleW(None), 0):
-        log("SetWindowsHookExW failed: %d" % ctypes.get_last_error())
-        os._exit(1)
-    pump()
+    hook_watch.thread_id = kernel32.GetCurrentThreadId()
+    hook = None
+
+    def install():
+        h = user32.SetWindowsHookExW(WH_MOUSE_LL, hook_thread.proc, kernel32.GetModuleHandleW(None), 0)
+        if not h:
+            log("SetWindowsHookExW failed: %d" % ctypes.get_last_error())
+            flush_log()
+            os._exit(1)
+        hook_watch.last_call = time.perf_counter()
+        return h
+
+    hook = install()
+    msg = w.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        if msg.message == WM_APP_REHOOK:
+            user32.UnhookWindowsHookEx(hook)
+            hook = install()
+
+
+def refresher():
+    """Background upkeep: re-read settings, and reinstall the hook if Windows dropped it."""
+    while True:
+        user_settings.refresh()
+        _refresh_layout()
+        _refresh_hotkeys()
+        silent = hook_watch.last_mouse - hook_watch.last_call
+        if silent > HOOK_SILENT_S and hook_watch.thread_id:
+            # Also happens while an elevated (admin) window has focus: hooks aren't
+            # called then. Reinstalling is harmless; just don't flood the log.
+            now = time.perf_counter()
+            if now - hook_watch.last_report > 30:
+                log("mouse hook went silent for %.1f s while the mouse moved; reinstalling" % silent)
+                hook_watch.last_report = now
+            hook_watch.last_call = now
+            user32.PostThreadMessageW(hook_watch.thread_id, WM_APP_REHOOK, 0, 0)
+        time.sleep(0.25)
 
 
 def pump():
@@ -696,8 +1222,34 @@ def pump():
         user32.DispatchMessageW(ctypes.byref(msg))
 
 
+def make_dpi_aware():
+    """Work in physical pixels, like the mouse hook does.
+
+    Without this, on a scaled display (125 %, 150 %...) Windows hands this
+    process scaled window coordinates while the hook reports physical ones,
+    so clicks would be looked up in the wrong place.
+    """
+    try:
+        user32.SetProcessDpiAwarenessContext.restype = w.BOOL
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):  # per-monitor v2 (Windows 10 1703+)
+            return
+    except AttributeError:
+        pass
+    try:
+        if ctypes.WinDLL("shcore").SetProcessDpiAwareness(2) == 0:     # per-monitor (Windows 8.1+)
+            return
+    except (AttributeError, OSError):
+        pass
+    user32.SetProcessDPIAware()
+
+
 def main():
-    global KICAD_PID, COMMON_JSON
+    global KICAD_PID, COMMON_JSON, CLICK_SLOP_PX
+    make_dpi_aware()
+    try:
+        CLICK_SLOP_PX = round(CLICK_SLOP * user32.GetDpiForSystem() / 96)
+    except AttributeError:  # before Windows 10 1607
+        pass
     KICAD_PID = int(sys.argv[1])
     COMMON_JSON = sys.argv[2] if len(sys.argv) > 2 else None
 
@@ -709,7 +1261,7 @@ def main():
     # Record crashes: pythonw has no console to print them to.
     crash_log = open(LOG_PATH, "a", encoding="utf-8")
     faulthandler.enable(crash_log)
-    threading.excepthook = lambda a: log("thread %s died: %r" % (a.thread.name, a.exc_value))
+    threading.excepthook = lambda a: (log("thread %s died: %r" % (a.thread.name, a.exc_value)), flush_log())
 
     kicad = kernel32.OpenProcess(SYNCHRONIZE, False, KICAD_PID)
     if not kicad:
@@ -719,12 +1271,18 @@ def main():
     # The hook blocks all mouse input until it returns, so it must get the GIL
     # quickly; the default 5 ms switch interval lets lag pile up.
     sys.setswitchinterval(0.0002)
-    for fn in (sender, pan.sender, raw_input_thread, hook_thread):
-        threading.Thread(target=fn, daemon=True).start()
+    kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS)
+    _refresh_layout()
+    _refresh_hotkeys()
+    for fn in (log_writer, sender, pan.sender, raw_input_thread, hook_thread, refresher, chooser.run):
+        threading.Thread(target=fn, name=getattr(fn, "__qualname__", "worker"), daemon=True).start()
     log("started for KiCad pid %d" % KICAD_PID)
+    if DEBUG:
+        log("settings from %s: %s" % (settings.PATH, {k: v for k, v in user_settings.get().items() if "click" in k}))
 
     kernel32.WaitForSingleObject(w.HANDLE(kicad), w.DWORD(INFINITE))  # exit together with KiCad
     log("KiCad exited, stopping")
+    flush_log()
 
 
 if __name__ == "__main__":

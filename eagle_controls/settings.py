@@ -6,8 +6,19 @@ import os
 PATH = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.dirname(os.path.abspath(__file__)),
                     "kicad_eagle_controls_prefs.json")
 
-# What a click can do; the helper presses the matching key setting.
-ACTIONS = ("rotate", "flip", "layer", "off")
+# What a click can do; the helper presses KiCad's hotkey for the matching action.
+ACTIONS = ("rotate", "flip", "layer", "next_layer", "posture", "via_chooser", "off")
+
+# The KiCad actions behind them, as named in KiCad's user.hotkeys file, and
+# KiCad's default keys for when that file is missing or doesn't list one.
+KICAD_ACTIONS = {
+    "rotate": ("pcbnew.InteractiveEdit.rotateCcw", "R"),
+    "flip": ("pcbnew.InteractiveEdit.flip", "F"),
+    "layer": ("pcbnew.Control.layerToggle", "V"),                       # toggle the layer pair
+    "next_layer": ("pcbnew.Control.layerNext", "+"),                    # next copper layer down
+    "posture": ("pcbnew.InteractiveRouter.SwitchPosture", "/"),
+    "via_chooser": ("pcbnew.InteractiveRouter.SelLayerAndPlaceVia", "<"),  # through via, pick layer
+}
 
 DEFAULTS = {
     # Touchpad
@@ -18,12 +29,11 @@ DEFAULTS = {
     "wheel_zoom": True,             # mouse wheel zooms (else it pans, as KiCad's trackpad layout does)
     "right_click": "rotate",        # on the board, not dragging: an ACTIONS entry or "menu"
     "right_click_drag": "rotate",   # while dragging a part with the left button
-    "middle_click": "layer",        # middle click without moving
+    "right_click_route": "posture",  # while routing (pencil cursor): switch bend direction
+    "middle_click": "next_layer",   # middle click without moving
     "middle_click_drag": "flip",    # middle click while dragging a part
-    # KiCad hotkeys the actions press, in KiCad's notation ("R", "Shift+R", "PgUp", ...)
-    "key_rotate": "R",
-    "key_flip": "F",
-    "key_layer": "V",
+    "middle_click_route": "via_chooser",  # middle click while routing: pick the through via's layer
+    "chooser_places_via": True,    # the left click that picks the via layer also places the via
     # Misc
     "dont_ask_layout": False,       # don't remind about KiCad's trackpad scroll layout
 }
@@ -49,9 +59,35 @@ def valid_key(text):
             and (len(key) == 1 or key.lower() in KEY_NAMES))
 
 
+def hotkeys_path(kicad_settings_dir):
+    return os.path.join(kicad_settings_dir, "user.hotkeys")
+
+
+def kicad_hotkeys(kicad_settings_dir):
+    """{action: key} as bound in KiCad, in KiCad's notation ("R", "Shift+R", "PgUp"...).
+
+    "" means KiCad has no key for that action.
+    """
+    keys = {action: default for action, (_, default) in KICAD_ACTIONS.items()}
+    try:
+        with open(hotkeys_path(kicad_settings_dir), encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except (OSError, TypeError):
+        return keys
+    bound = {}
+    for line in lines:  # "<action name>	<key>	<alternate key>"
+        parts = line.split("	")
+        if len(parts) >= 2:
+            bound[parts[0]] = [k.strip() for k in parts[1:3]]
+    for action, (name, _) in KICAD_ACTIONS.items():
+        if name in bound:
+            keys[action] = next((k for k in bound[name] if valid_key(k)), "")
+    return keys
+
+
 def load():
     try:
-        with open(PATH, encoding="utf-8") as f:
+        with open(PATH, encoding="utf-8-sig") as f:  # tolerate a BOM from hand edits
             data = json.load(f)
     except (OSError, ValueError):
         data = {}

@@ -9,7 +9,8 @@ A KiCad (Windows) plugin that makes the PCB and footprint editors behave like Ea
 | Mouse wheel | Zooms |
 | Right click on the board | Rotates (sends `R`) the part you're placing, moving (`M`) or dragging, or the selection, instead of opening the context menu. Shift + right click still opens the menu. |
 | Middle click while dragging a part | Flips it to the other side (sends `F`), like Eagle's mirror |
-| Middle click otherwise | Switches layer (sends `V`: toggles the active layer pair; while routing it places a via and changes layer) |
+| Right click while routing | Switches the bend direction (sends `/`) |
+| Middle click otherwise, and while routing | Goes to the next copper layer down (sends `+`), wrapping from B.Cu back to F.Cu; while routing that places a via. The active layer shows in the toolbar's layer selector. |
 
 Middle- and right-button drags still pan. Every one of these can be changed or turned off in the settings.
 
@@ -32,8 +33,8 @@ The plugin starts automatically when the PCB editor opens. It runs a helper proc
 **PCB Editor → Tools → External Plugins → Eagle-style controls** opens the settings. Each Eagle-style behaviour can be changed or switched back to KiCad's own:
 
 - **Touchpad:** free two-axis panning on/off (off leaves Windows' axis-locked scrolling), **pan sensitivity** (0.25× to 4× your Windows touchpad speed) and **pan acceleration** (off to 100%; slow swipes pan finer, fast swipes further).
-- **Mouse:** wheel zooms on/off (off: it pans). **Right click**, **right click while dragging**, **middle click** and **middle click while dragging** can each rotate, flip, switch layer, or do nothing extra. For plain right click, "nothing extra" means KiCad's context menu. "Dragging" means holding the left button on a part.
-- **KiCad hotkeys used:** the keys sent for rotate, flip and switch layer, in KiCad's notation (`R`, `Shift+R`, `PgUp`, …). Change them only if you rebound them in KiCad.
+- **Mouse:** wheel zooms on/off (off: it pans). **Right click** and **middle click**, each set separately for normal use, while dragging a part and while routing, can rotate, flip, go to the next layer, toggle the layer pair, switch the bend direction, or do nothing extra. For plain right click, "nothing extra" means KiCad's context menu. "Dragging" means holding the left button on a part; "routing" means the router's pencil cursor is showing.
+- **Hotkeys** aren't set here: the plugin uses whatever keys KiCad has for rotate, flip, next layer, layer pair, bend direction and "Select Layer and Place Through Via" (Preferences → Hotkeys, read from KiCad's `user.hotkeys`). The window only warns if a click uses an action that has no key in KiCad.
 - **Reminder** about KiCad's trackpad scroll layout on/off.
 
 Changes apply right away. Settings are stored in `%LOCALAPPDATA%\kicad_eagle_controls_prefs.json`. Mouse-wheel zoom speed is KiCad's own setting, in Preferences → Mouse and Touchpad.
@@ -44,7 +45,7 @@ The helper uses a Windows low-level mouse hook, and only acts on input aimed at 
 
 - **Wheel:** KiCad is set to the trackpad layout, where scrolling pans and Ctrl+scroll zooms. Windows sends touchpad pinches as Ctrl+scroll, so pinching zooms by itself. A real mouse wheel would now pan, so the helper resends wheel events from a mouse with Ctrl held. It tells the mouse from the touchpad by raw input: a mouse produces raw wheel input in 120-unit notches, and touchpad scrolling doesn't. If you hold Ctrl, Shift or Alt while scrolling, the event passes through unchanged.
 - **Touchpad panning:** Windows locks two-finger scrolling to one axis. The helper reads finger contacts directly from Precision Touchpads (`touchpad.py`, HID raw input). It decides whether the gesture is a pan (fingers move together) or a pinch (fingers spread or close). Over a KiCad canvas, it swallows Windows' scroll events and pans from the real finger motion, at most once per frame. The speed and direction are calibrated against Windows' own scroll events and saved in `%LOCALAPPDATA%\kicad_eagle_controls.json`.
-- **Clicks:** a right press is held back until release. If the mouse moves first, it's handed to KiCad so right-drag still pans. Middle clicks pass through and the action follows on release. The keys come from the settings; click timings are constants at the top of `daemon.py`.
+- **Clicks:** a right press is held back until release. If the mouse moves first, it's handed to KiCad so right-drag still pans. Middle clicks pass through and the action follows on release. The keys sent are read from KiCad's `user.hotkeys` and re-read when it changes; click timings are constants at the top of `daemon.py`.
 
 ## Limitations
 
