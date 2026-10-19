@@ -90,7 +90,7 @@ The helper (`pythonw.exe daemon.py <kicad pid>`):
 
 KiCad's Plugin and Content Manager lists packages from the [KiCad addon metadata repository](https://gitlab.com/kicad/addons/metadata). To publish a version:
 
-1. Bump `version` in `metadata.json`, then run `python build_pcm.py`. It writes the zip and `dist/submission/packages/com.github.machmar.eagle-controls/` (`metadata.json` with download URL, SHA-256 and sizes, plus `icon.png`).
+1. Bump `version` in `metadata.json` and `VERSION` in `eagle_controls/settings.py` (the build stops if they differ; the settings window shows it), then run `python build_pcm.py`. It writes the zip and `dist/submission/packages/com.github.machmar.eagle-controls/` (`metadata.json` with download URL, SHA-256 and sizes, plus `icon.png`).
 2. Upload the zip from that same run to the GitHub release `v<version>`: `gh release upload v<version> dist/eagle-controls-<version>.zip --clobber`. The SHA-256 must match the uploaded file.
 3. The repository must be public and the release must not be a draft, so PCM can download it.
 4. Fork the addon metadata repository on GitLab, copy the `packages/...` folder in (for a later version, add the new `versions` entry to the existing file), and open a merge request.

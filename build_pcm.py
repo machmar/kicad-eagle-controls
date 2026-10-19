@@ -16,7 +16,9 @@ as the submission files (gh release upload ... --clobber).
 import hashlib
 import json
 import os
+import re
 import shutil
+import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +30,10 @@ def main():
         meta = json.load(f)
     meta["versions"] = meta["versions"][:1]
     version = meta["versions"][0]["version"]
+    with open(os.path.join(HERE, "eagle_controls", "settings.py"), encoding="utf-8") as f:
+        plugin_version = re.search(r'^VERSION = "(.*)"', f.read(), re.M).group(1)
+    if plugin_version != version:
+        sys.exit("metadata.json says %s but eagle_controls/settings.py says %s" % (version, plugin_version))
     icon = os.path.join(HERE, "resources", "icon.png")
 
     dist = os.path.join(HERE, "dist")
