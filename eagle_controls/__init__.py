@@ -108,70 +108,153 @@ def ask_for_trackpad_layout(force=False):
     dlg.Destroy()
 
 
+CLICK_ACTIONS = [("rotate", "Rotate"), ("flip", "Flip to other side"), ("layer", "Switch layer"),
+                 ("off", "Nothing")]
+RIGHT_CLICK_ACTIONS = CLICK_ACTIONS[:3] + [("menu", "KiCad's context menu")]
+
+
 def show_settings():
-    """Sensitivity and acceleration sliders; the helper picks changes up on the next swipe."""
+    """Every behaviour that differs from KiCad can be changed or turned off here.
+
+    The helper re-reads the settings file, so changes apply right away.
+    """
     import wx
 
     values = settings.load()
     dlg = wx.Dialog(None, title=TITLE)
-    sizer = wx.BoxSizer(wx.VERTICAL)
-    grid = wx.FlexGridSizer(2, 3, 10, 10)
-    grid.AddGrowableCol(1)
+    outer = wx.BoxSizer(wx.VERTICAL)
 
+    def section(label):
+        box = wx.StaticBoxSizer(wx.VERTICAL, dlg, label)
+        outer.Add(box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        grid = wx.FlexGridSizer(0, 3, 8, 10)
+        grid.AddGrowableCol(1)
+        return box, grid, box.GetStaticBox()  # controls in the box must be its children
+
+    def choice(parent, grid, label, options, value):
+        ctrl = wx.Choice(parent, choices=[text for _, text in options])
+        keys = [key for key, _ in options]
+        ctrl.SetSelection(keys.index(value) if value in keys else 0)
+        grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(ctrl, 1, wx.EXPAND)
+        grid.AddSpacer(0)
+        return lambda: keys[ctrl.GetSelection()], lambda v: ctrl.SetSelection(keys.index(v))
+
+    # --- Touchpad
+    box, grid, pnl = section("Touchpad")
+    free_pan = wx.CheckBox(pnl, label="Two-finger swipe pans in any direction (not locked to one axis)")
+    free_pan.SetValue(values["touchpad_free_pan"])
+    box.Add(free_pan, 0, wx.ALL, 6)
     # Sensitivity on a log scale: slider -200..200 -> 0.25x..4x.
-    sens = wx.Slider(dlg, value=round(100 * math.log2(values["pan_sensitivity"])),
-                     minValue=-200, maxValue=200, size=(260, -1))
-    sens_label = wx.StaticText(dlg, size=(50, -1))
-    accel = wx.Slider(dlg, value=round(100 * values["pan_acceleration"]), minValue=0, maxValue=100)
-    accel_label = wx.StaticText(dlg, size=(50, -1))
+    sens = wx.Slider(pnl, value=round(100 * math.log2(values["pan_sensitivity"])),
+                     minValue=-200, maxValue=200, size=(240, -1))
+    sens_label = wx.StaticText(pnl, size=(50, -1))
+    accel = wx.Slider(pnl, value=round(100 * values["pan_acceleration"]), minValue=0, maxValue=100)
+    accel_label = wx.StaticText(pnl, size=(50, -1))
 
     def update(_=None):
         sens_label.SetLabel("%.2f×" % 2 ** (sens.GetValue() / 100))
         accel_label.SetLabel("%d %%" % accel.GetValue() if accel.GetValue() else "off")
+        sens.Enable(free_pan.GetValue())
+        accel.Enable(free_pan.GetValue())
 
     for label, slider, value in (("Pan sensitivity", sens, sens_label), ("Pan acceleration", accel, accel_label)):
-        grid.Add(wx.StaticText(dlg, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(wx.StaticText(pnl, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(slider, 1, wx.EXPAND)
         grid.Add(value, 0, wx.ALIGN_CENTER_VERTICAL)
         slider.Bind(wx.EVT_SLIDER, update)
-    update()
+    free_pan.Bind(wx.EVT_CHECKBOX, update)
+    box.Add(grid, 0, wx.EXPAND | wx.ALL, 6)
 
-    sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 12)
-    rotate = wx.CheckBox(dlg, label="Right click always rotates (Shift+right click opens the menu)")
-    rotate.SetValue(values["right_click_rotates_always"])
-    rotate.SetToolTip("Off: right click rotates only while you drag a part with the left button.")
-    sizer.Add(rotate, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-    sizer.Add(wx.StaticText(dlg, label="Touchpad panning speed follows your Windows touchpad settings;\n"
-                                       "sensitivity scales it. With acceleration, slow swipes pan finer\n"
-                                       "and fast swipes pan further. Mouse-wheel zoom speed is set in\n"
-                                       "KiCad's Preferences → Mouse and Touchpad."),
-              0, wx.LEFT | wx.RIGHT, 12)
+    # --- Mouse
+    box, grid, pnl = section("Mouse")
+    wheel = wx.CheckBox(pnl, label="Mouse wheel zooms (otherwise it pans)")
+    wheel.SetValue(values["wheel_zoom"])
+    box.Add(wheel, 0, wx.ALL, 6)
+    right = choice(pnl, grid, "Right click", RIGHT_CLICK_ACTIONS, values["right_click"])
+    right_drag = choice(pnl, grid, "Right click while dragging", CLICK_ACTIONS, values["right_click_drag"])
+    middle = choice(pnl, grid, "Middle click", CLICK_ACTIONS, values["middle_click"])
+    middle_drag = choice(pnl, grid, "Middle click while dragging", CLICK_ACTIONS, values["middle_click_drag"])
+    box.Add(grid, 0, wx.EXPAND | wx.ALL, 6)
+    box.Add(wx.StaticText(pnl, label="“Dragging” means holding the left button on a part. "
+                                     "Shift + right click always\nopens KiCad's menu. "
+                                     "Right- and middle-button drags still pan."),
+            0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+
+    # --- Keys
+    box, grid, pnl = section("KiCad hotkeys used")
+    keys = {}
+    for name, label in (("rotate", "Rotate"), ("flip", "Flip"), ("layer", "Switch layer")):
+        keys[name] = wx.TextCtrl(pnl, value=values["key_" + name], size=(120, -1))
+        grid.Add(wx.StaticText(pnl, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(keys[name], 0)
+        grid.AddSpacer(0)
+    box.Add(grid, 0, wx.EXPAND | wx.ALL, 6)
+    box.Add(wx.StaticText(pnl, label="Only change these if you rebound them in KiCad "
+                                     "(e.g. R, Shift+R, PgUp)."),
+            0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+
+    # --- KiCad's scroll layout
+    remind = wx.CheckBox(dlg, label="Remind me when KiCad isn't using the trackpad scroll layout")
+    remind.SetValue(not values["dont_ask_layout"])
+    outer.Add(remind, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
     if not _trackpad_layout():
-        warn = wx.StaticText(dlg, label="KiCad isn't using the trackpad scroll layout, so swipe and\n"
-                                        "wheel remapping are off. See Preferences → Mouse and Touchpad\n"
-                                        "→ Reset to Trackpad Defaults.")
+        warn = wx.StaticText(dlg, label="KiCad isn't using the trackpad scroll layout, so the swipe and\n"
+                                        "wheel settings have no effect. See Preferences → Mouse and\n"
+                                        "Touchpad → Reset to Trackpad Defaults.")
         warn.SetForegroundColour(wx.Colour(200, 60, 0))
-        sizer.Add(warn, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        outer.Add(warn, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+
+    def defaults(_):
+        d = settings.DEFAULTS
+        free_pan.SetValue(d["touchpad_free_pan"])
+        sens.SetValue(0)
+        accel.SetValue(0)
+        wheel.SetValue(d["wheel_zoom"])
+        for (_, set_), key in ((right, "right_click"), (right_drag, "right_click_drag"),
+                               (middle, "middle_click"), (middle_drag, "middle_click_drag")):
+            set_(d[key])
+        for name, ctrl in keys.items():
+            ctrl.SetValue(d["key_" + name])
+        remind.SetValue(True)
+        update()
 
     buttons = wx.StdDialogButtonSizer()
     reset = wx.Button(dlg, wx.ID_DEFAULT, "Defaults")
-    reset.Bind(wx.EVT_BUTTON, lambda _: (sens.SetValue(0), accel.SetValue(0), rotate.SetValue(True), update()))
+    reset.Bind(wx.EVT_BUTTON, defaults)
     buttons.Add(reset)
     buttons.AddButton(wx.Button(dlg, wx.ID_OK))
     buttons.AddButton(wx.Button(dlg, wx.ID_CANCEL))
     buttons.Realize()
-    sizer.Add(buttons, 0, wx.EXPAND | wx.ALL, 12)
-    dlg.SetSizerAndFit(sizer)
+    outer.Add(buttons, 0, wx.EXPAND | wx.ALL, 12)
+    update()
+    dlg.SetSizerAndFit(outer)
     dlg.CentreOnScreen()
 
-    if dlg.ShowModal() == wx.ID_OK:
-        values["pan_sensitivity"] = 2 ** (sens.GetValue() / 100)
-        values["pan_acceleration"] = accel.GetValue() / 100
-        values["right_click_rotates_always"] = rotate.GetValue()
+    while dlg.ShowModal() == wx.ID_OK:
+        bad = [ctrl.GetValue() for ctrl in keys.values() if not settings.valid_key(ctrl.GetValue())]
+        if bad:
+            wx.MessageBox("Not a key KiCad notation can describe: %s" % ", ".join(repr(b) for b in bad),
+                          TITLE, wx.ICON_WARNING)
+            continue
+        values.update({
+            "touchpad_free_pan": free_pan.GetValue(),
+            "pan_sensitivity": 2 ** (sens.GetValue() / 100),
+            "pan_acceleration": accel.GetValue() / 100,
+            "wheel_zoom": wheel.GetValue(),
+            "right_click": right[0](),
+            "right_click_drag": right_drag[0](),
+            "middle_click": middle[0](),
+            "middle_click_drag": middle_drag[0](),
+            "dont_ask_layout": not remind.GetValue(),
+        })
+        for name, ctrl in keys.items():
+            values["key_" + name] = ctrl.GetValue().strip()
         try:
             settings.save(values)
         except OSError as e:
             wx.MessageBox("Could not save settings: %s" % e, TITLE, wx.ICON_ERROR)
+        break
     dlg.Destroy()
 
 

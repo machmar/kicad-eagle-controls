@@ -4,7 +4,9 @@ Runs as a small helper process next to KiCad (started by the plugin in
 __init__.py) and watches input with a low-level mouse hook:
 
   * right click on the board (Shift+right click: KiCad's menu)  -> rotate (R)
-  * middle click without moving the mouse                        -> switch layer (V)
+  * middle click without moving the mouse                        -> switch layer (V),
+                                                                    or flip (F) while dragging
+Each of these can be changed or turned off in the settings (settings.py).
   * mouse wheel                                                  -> zoom
   * touchpad two-finger swipe (any direction) / pinch            -> pan / zoom
 
@@ -31,8 +33,6 @@ from ctypes import wintypes as w
 
 # --- settings -------------------------------------------------------------
 
-ROTATE_KEY = ord("R")      # pcbnew.InteractiveEdit.rotateCcw
-LAYER_KEY = ord("V")       # pcbnew.Control.layerToggle, and "place via" while routing
 CLICK_SLOP_PX = 4          # middle button may move this much and still count as a click
 CLICK_MAX_S = 0.5          # ...and must be released within this time
 WHEEL_STICKY_S = 0.35      # a scroll gesture keeps its mouse/touchpad verdict this long
@@ -190,8 +190,56 @@ def sender():
         user32.SendInput(len(events), arr, ctypes.sizeof(INPUT))
 
 
-def tap(vk):
-    outbox.put([_key(vk), _key(vk, up=True)])
+NAMED_KEYS = {"pgup": 0x21, "pgdn": 0x22, "end": 0x23, "home": 0x24, "left": 0x25, "up": 0x26,
+              "right": 0x27, "down": 0x28, "ins": 0x2D, "insert": 0x2D, "del": 0x2E, "delete": 0x2E,
+              "tab": 0x09, "space": 0x20, "back": 0x08, "backspace": 0x08, "esc": 0x1B,
+              "escape": 0x1B, "return": 0x0D, "enter": 0x0D}
+NAMED_KEYS.update({"f%d" % n: 0x6F + n for n in range(1, 25)})
+MODIFIER_KEYS = {"shift": VK_SHIFT, "ctrl": VK_CONTROL, "alt": VK_MENU}
+KEY_ACTIONS = ("rotate", "flip", "layer")
+_parsed_keys = {}
+
+
+def parse_key(text):
+    """KiCad hotkey notation ("R", "Shift+R", "Ctrl++", "PgUp") -> ([modifier vks], vk), or None."""
+    text = text.strip()
+    if text.endswith("++"):
+        mods, key = text[:-2].split("+") if len(text) > 2 else [], "+"
+    elif "+" in text[:-1]:
+        *mods, key = text.split("+")
+    else:
+        mods, key = [], text
+    try:
+        vks = [MODIFIER_KEYS[m.strip().lower()] for m in mods if m.strip()]
+    except KeyError:
+        return None
+    key = key.strip()
+    if key.lower() in NAMED_KEYS:
+        return vks, NAMED_KEYS[key.lower()]
+    if len(key) != 1:
+        return None
+    scan = user32.VkKeyScanW(ord(key.lower())) & 0xFFFF
+    if scan == 0xFFFF:
+        return None
+    shift_state = scan >> 8
+    for bit, vk in ((1, VK_SHIFT), (2, VK_CONTROL), (4, VK_MENU)):
+        if shift_state & bit and vk not in vks:
+            vks.append(vk)
+    return vks, scan & 0xFF
+
+
+def do_action(action):
+    """Press the KiCad hotkey configured for "rotate", "flip" or "layer"."""
+    text = user_settings.get().get("key_" + action, "")
+    if text not in _parsed_keys:
+        _parsed_keys[text] = parse_key(text)
+        if _parsed_keys[text] is None:
+            log("can't use %r as the %s key" % (text, action))
+    combo = _parsed_keys[text]
+    if combo:
+        mods, vk = combo
+        outbox.put([_key(m) for m in mods] + [_key(vk), _key(vk, up=True)]
+                   + [_key(m, up=True) for m in reversed(mods)])
 
 
 def _hwheel(delta):
@@ -345,7 +393,8 @@ class Pan:
                 elif self.travel >= PAN_START_MM:
                     pt = POINT()
                     user32.GetCursorPos(ctypes.byref(pt))
-                    self.state = "pan" if target(pt) and trackpad_layout() else "ignore"
+                    self.state = ("pan" if target(pt) and trackpad_layout()
+                                  and user_settings.get()["touchpad_free_pan"] else "ignore")
                     if DEBUG:
                         log("touchpad gesture: %s" % self.state)
             if self.state == "pan":
@@ -502,19 +551,10 @@ def classify_wheel(delta, injected):
 # --- the hook -------------------------------------------------------------
 
 KICAD_PID = 0
-middle = None          # (x, y, time) of a middle press on the board, until it moves
+middle = None          # (x, y, time, action) of a middle press on the board, until it moves
 swallow_right_up = False
-right_pending = None   # (x, y) of a held-back right press: rotate on release, or pan if it moves
+right_pending = None   # (x, y, action) of a held-back right press: act on release, or pan if it moves
 left_down = False      # tracked here: GetAsyncKeyState can miss it from another process
-
-
-class CURSORINFO(ctypes.Structure):
-    _fields_ = [("cbSize", w.DWORD), ("flags", w.DWORD), ("hCursor", w.HANDLE), ("pt", POINT)]
-
-
-def cursor_handle():
-    ci = CURSORINFO(cbSize=ctypes.sizeof(CURSORINFO))
-    return ci.hCursor if user32.GetCursorInfo(ctypes.byref(ci)) else None
 
 
 def target(pt):
@@ -534,6 +574,14 @@ def right_down_injected():
     i = INPUT(type=INPUT_MOUSE)
     i.u.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_RIGHTDOWN, 0, MAGIC)
     return i
+
+
+def modifiers_held():
+    return key_down(VK_SHIFT) or key_down(VK_CONTROL) or key_down(VK_MENU)
+
+
+def dragging():
+    return left_down or key_down(VK_LBUTTON)
 
 
 def handle(msg, info):
@@ -558,56 +606,62 @@ def handle(msg, info):
         return False
 
     if msg == WM_RBUTTONDOWN:
-        where = target(info.pt)
-        if DEBUG:
-            log("right down: left=%s async=%s target=%s cursor=%s"
-                % (left_down, key_down(VK_LBUTTON), where, cursor_handle()))
-        if where != "board":
+        if target(info.pt) != "board":
             return False
-        if left_down or key_down(VK_LBUTTON):
-            tap(ROTATE_KEY)                       # rotating while dragging a part
+        s = user_settings.get()
+        if dragging():
+            action = s["right_click_drag"]
+            if action not in KEY_ACTIONS:
+                return False
+            do_action(action)
             swallow_right_up = True
             return True
-        if user_settings.get()["right_click_rotates_always"] and not (
-                key_down(VK_SHIFT) or key_down(VK_CONTROL) or key_down(VK_MENU)):
-            right_pending = (info.pt.x, info.pt.y)  # decided on release or movement
-            return True
-        return False                              # Shift+right click: KiCad's menu
+        action = s["right_click"]
+        if action not in KEY_ACTIONS or modifiers_held():
+            return False                          # e.g. Shift+right click: KiCad's menu
+        right_pending = (info.pt.x, info.pt.y, action)  # decided on release or movement
+        return True
 
     if msg == WM_RBUTTONUP:
         if swallow_right_up:
             swallow_right_up = False
             return True
         if right_pending:
+            do_action(right_pending[2])
             right_pending = None
-            tap(ROTATE_KEY)
             return True
         return False
 
     if msg == WM_MBUTTONDOWN:
-        middle = (info.pt.x, info.pt.y, time.perf_counter()) if target(info.pt) == "board" else None
+        middle = None
+        if target(info.pt) == "board":
+            s = user_settings.get()
+            action = s["middle_click_drag"] if dragging() else s["middle_click"]
+            if action in KEY_ACTIONS:
+                middle = (info.pt.x, info.pt.y, time.perf_counter(), action)
         return False
 
     if msg == WM_MBUTTONUP:
         if middle and time.perf_counter() - middle[2] < CLICK_MAX_S:
-            tap(LAYER_KEY)
+            do_action(middle[3])
         middle = None
         return False
 
     if msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):
         if target(info.pt) is None or not trackpad_layout():
             return False
+        s = user_settings.get()
         delta = ctypes.c_short(info.mouseData >> 16).value
         horizontal = msg == WM_MOUSEHWHEEL
         fingers = touchpads.fingers
         if fingers >= 2 or time.perf_counter() < pan.swallow_until:
-            return pan.windows_wheel(horizontal, delta, fingers)
-        if horizontal:
+            return pan.windows_wheel(horizontal, delta, fingers) if s["touchpad_free_pan"] else False
+        if horizontal or not s["wheel_zoom"]:
             return False
         kind = classify_wheel(delta, bool(info.flags & LLMHF_INJECTED))
         if DEBUG:
             log("wheel delta=%d flags=%x -> %s" % (delta, info.flags, kind))
-        if kind == "mouse" and not (key_down(VK_CONTROL) or key_down(VK_SHIFT) or key_down(VK_MENU)):
+        if kind == "mouse" and not modifiers_held():
             zoom_wheel(delta)
             return True
         return False
