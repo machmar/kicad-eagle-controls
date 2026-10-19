@@ -1,8 +1,8 @@
 {
   "$schema": "https://go.kicad.org/pcm/schemas/v1",
   "name": "Eagle-style Controls",
-  "description": "Eagle-like navigation: touchpad swipe pans, pinch and mouse wheel zoom, right click rotates while dragging, middle click switches layer.",
-  "description_full": "Makes the PCB and footprint editors handle the mouse and touchpad like Eagle.\n\n- Two-finger touchpad swipe pans in any direction, including diagonally (Windows' one-axis scroll lock is bypassed)\n- Pinch zooms\n- Mouse wheel zooms\n- Right click while dragging a part rotates it instead of opening the context menu\n- Middle click without moving switches the active layer (places a via while routing)\n\nStarts automatically with the PCB editor. Needs KiCad's trackpad scroll layout (Preferences > Mouse and Touchpad > Reset to Trackpad Defaults); the plugin explains this on first start.\n\nWindows only; uses Precision Touchpad raw input.",
+  "description": "Eagle-like navigation: touchpad swipe pans, pinch and mouse wheel zoom, right click rotates, middle click switches layer.",
+  "description_full": "Makes the PCB and footprint editors handle the mouse and touchpad like Eagle.\n\n- Two-finger touchpad swipe pans in any direction, including diagonally (Windows' one-axis scroll lock is bypassed)\n- Pinch zooms\n- Mouse wheel zooms\n- Right click rotates the part you're placing, moving or dragging instead of opening the context menu (Shift + right click still opens it)\n- Middle click without moving switches the active layer (places a via while routing)\n\nStarts automatically with the PCB editor. Needs KiCad's trackpad scroll layout (Preferences > Mouse and Touchpad > Reset to Trackpad Defaults); the plugin explains this on first start.\n\nWindows only; uses Precision Touchpad raw input.",
   "identifier": "com.github.machmar.eagle-controls",
   "type": "plugin",
   "author": {

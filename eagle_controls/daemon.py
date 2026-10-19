@@ -3,7 +3,7 @@
 Runs as a small helper process next to KiCad (started by the plugin in
 __init__.py) and watches input with a low-level mouse hook:
 
-  * right click while holding the left button (dragging a part) -> rotate (R)
+  * right click on the board (Shift+right click: KiCad's menu)  -> rotate (R)
   * middle click without moving the mouse                        -> switch layer (V)
   * mouse wheel                                                  -> zoom
   * touchpad two-finger swipe (any direction) / pinch            -> pan / zoom
@@ -64,7 +64,7 @@ WM_MOUSEWHEEL, WM_MOUSEHWHEEL, WM_INPUT = 0x020A, 0x020E, 0x00FF
 LLMHF_INJECTED = 0x01
 VK_LBUTTON, VK_SHIFT, VK_CONTROL, VK_MENU = 0x01, 0x10, 0x11, 0x12
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
-MOUSEEVENTF_WHEEL, MOUSEEVENTF_HWHEEL = 0x0800, 0x1000
+MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_WHEEL, MOUSEEVENTF_HWHEEL = 0x0008, 0x0800, 0x1000
 KEYEVENTF_KEYUP = 0x0002
 RID_INPUT, RIM_TYPEMOUSE, RIM_TYPEHID, RIDEV_INPUTSINK = 0x10000003, 0, 2, 0x00000100
 RI_MOUSE_WHEEL = 0x0400
@@ -504,6 +504,17 @@ def classify_wheel(delta, injected):
 KICAD_PID = 0
 middle = None          # (x, y, time) of a middle press on the board, until it moves
 swallow_right_up = False
+right_pending = None   # (x, y) of a held-back right press: rotate on release, or pan if it moves
+left_down = False      # tracked here: GetAsyncKeyState can miss it from another process
+
+
+class CURSORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", w.DWORD), ("flags", w.DWORD), ("hCursor", w.HANDLE), ("pt", POINT)]
+
+
+def cursor_handle():
+    ci = CURSORINFO(cbSize=ctypes.sizeof(CURSORINFO))
+    return ci.hCursor if user32.GetCursorInfo(ctypes.byref(ci)) else None
 
 
 def target(pt):
@@ -519,25 +530,57 @@ def target(pt):
     return "board" if any(f in title for f in EAGLE_FRAMES) else "canvas"
 
 
+def right_down_injected():
+    i = INPUT(type=INPUT_MOUSE)
+    i.u.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_RIGHTDOWN, 0, MAGIC)
+    return i
+
+
 def handle(msg, info):
     """Return True to swallow the event."""
-    global middle, swallow_right_up
+    global middle, swallow_right_up, right_pending, left_down
+
+    if msg == WM_LBUTTONDOWN:
+        left_down = True
+        return False
+
+    if msg == WM_LBUTTONUP:
+        left_down = False
+        return False
 
     if msg == WM_MOUSEMOVE:
         if middle and (abs(info.pt.x - middle[0]) > CLICK_SLOP_PX or abs(info.pt.y - middle[1]) > CLICK_SLOP_PX):
             middle = None  # it's a pan drag, leave it to KiCad
+        if right_pending and (abs(info.pt.x - right_pending[0]) > CLICK_SLOP_PX
+                              or abs(info.pt.y - right_pending[1]) > CLICK_SLOP_PX):
+            right_pending = None  # a right drag: give KiCad the press after all, so it pans
+            outbox.put([right_down_injected()])
         return False
 
     if msg == WM_RBUTTONDOWN:
-        if key_down(VK_LBUTTON) and target(info.pt) == "board":
-            tap(ROTATE_KEY)
+        where = target(info.pt)
+        if DEBUG:
+            log("right down: left=%s async=%s target=%s cursor=%s"
+                % (left_down, key_down(VK_LBUTTON), where, cursor_handle()))
+        if where != "board":
+            return False
+        if left_down or key_down(VK_LBUTTON):
+            tap(ROTATE_KEY)                       # rotating while dragging a part
             swallow_right_up = True
             return True
-        return False
+        if user_settings.get()["right_click_rotates_always"] and not (
+                key_down(VK_SHIFT) or key_down(VK_CONTROL) or key_down(VK_MENU)):
+            right_pending = (info.pt.x, info.pt.y)  # decided on release or movement
+            return True
+        return False                              # Shift+right click: KiCad's menu
 
     if msg == WM_RBUTTONUP:
         if swallow_right_up:
             swallow_right_up = False
+            return True
+        if right_pending:
+            right_pending = None
+            tap(ROTATE_KEY)
             return True
         return False
 

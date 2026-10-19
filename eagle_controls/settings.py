@@ -9,6 +9,7 @@ PATH = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.dirname(os.path.ab
 DEFAULTS = {
     "pan_sensitivity": 1.0,    # multiplier on top of the user's Windows touchpad speed
     "pan_acceleration": 0.0,   # 0 = constant speed, 1 = strongly speed-dependent
+    "right_click_rotates_always": True,  # False: only while dragging with the left button
     "dont_ask_layout": False,  # don't remind about KiCad's trackpad scroll layout
 }
 

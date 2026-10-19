@@ -7,10 +7,10 @@ A KiCad (Windows) plugin that makes the PCB and footprint editors behave like Ea
 | Touchpad two-finger swipe, in any direction including diagonal | Pans the board |
 | Touchpad pinch | Zooms |
 | Mouse wheel | Zooms |
-| Right click while holding the left button on a part | Rotates it (sends `R`) instead of opening the context menu |
+| Right click on the board | Rotates (sends `R`) the part you're placing, moving (`M`) or dragging, or the selection, instead of opening the context menu. Shift + right click still opens the menu. |
 | Middle click without moving the mouse | Switches layer (sends `V`: toggles the active layer pair; while routing it places a via and changes layer) |
 
-Middle-button drag still pans, and right click without the left button held still opens the context menu.
+Middle- and right-button drags still pan.
 
 ## Install
 
@@ -32,6 +32,7 @@ The plugin starts automatically when the PCB editor opens. It runs a helper proc
 
 - **Pan sensitivity** (0.25× to 4×): touchpad panning speed relative to your Windows touchpad speed.
 - **Pan acceleration** (off to 100%): with acceleration on, slow swipes pan finer and fast swipes pan further.
+- **Right click always rotates:** turn this off to keep KiCad's context menu on right click. Right click then rotates only while you drag a part with the left button.
 
 Changes apply from the next swipe. Settings are stored in `%LOCALAPPDATA%\kicad_eagle_controls_prefs.json`. Mouse-wheel zoom speed is KiCad's own setting, in Preferences → Mouse and Touchpad.
 

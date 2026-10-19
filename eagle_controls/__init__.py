@@ -137,6 +137,10 @@ def show_settings():
     update()
 
     sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 12)
+    rotate = wx.CheckBox(dlg, label="Right click always rotates (Shift+right click opens the menu)")
+    rotate.SetValue(values["right_click_rotates_always"])
+    rotate.SetToolTip("Off: right click rotates only while you drag a part with the left button.")
+    sizer.Add(rotate, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
     sizer.Add(wx.StaticText(dlg, label="Touchpad panning speed follows your Windows touchpad settings;\n"
                                        "sensitivity scales it. With acceleration, slow swipes pan finer\n"
                                        "and fast swipes pan further. Mouse-wheel zoom speed is set in\n"
@@ -151,7 +155,7 @@ def show_settings():
 
     buttons = wx.StdDialogButtonSizer()
     reset = wx.Button(dlg, wx.ID_DEFAULT, "Defaults")
-    reset.Bind(wx.EVT_BUTTON, lambda _: (sens.SetValue(0), accel.SetValue(0), update()))
+    reset.Bind(wx.EVT_BUTTON, lambda _: (sens.SetValue(0), accel.SetValue(0), rotate.SetValue(True), update()))
     buttons.Add(reset)
     buttons.AddButton(wx.Button(dlg, wx.ID_OK))
     buttons.AddButton(wx.Button(dlg, wx.ID_CANCEL))
@@ -163,6 +167,7 @@ def show_settings():
     if dlg.ShowModal() == wx.ID_OK:
         values["pan_sensitivity"] = 2 ** (sens.GetValue() / 100)
         values["pan_acceleration"] = accel.GetValue() / 100
+        values["right_click_rotates_always"] = rotate.GetValue()
         try:
             settings.save(values)
         except OSError as e:
@@ -174,7 +179,7 @@ class EagleControls(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = TITLE
         self.category = "Navigation"
-        self.description = ("Right click while dragging rotates, middle click switches layer, "
+        self.description = ("Right click rotates, middle click switches layer, "
                             "mouse wheel zooms, touchpad swipe pans and pinch zooms. "
                             "Runs automatically; this menu entry opens its settings.")
         self.show_toolbar_button = False
