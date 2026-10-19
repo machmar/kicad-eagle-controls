@@ -348,6 +348,8 @@ DEFAULT_GAIN = 25.0        # wheel units per mm until calibrated
 LEARN_MIN_MM = 15.0        # calibrate only from swipes at least this long
 PAN_INTERVAL_S = 1 / 60    # send at most one pan update per frame; every injected
                            # event passes through the hook, so flooding it adds lag
+PAN_SPEED = 0.3            # at sensitivity 1x, pan this fraction of Windows' own scroll speed;
+                           # matching it fully pans far too fast for board work
 ACCEL_REF_MM_S = 30.0      # with acceleration on, finger speed that pans at 1x
 ACCEL_RANGE = (0.25, 4.0)  # limits of the acceleration factor
 
@@ -429,7 +431,7 @@ class Pan:
 
     def on_motion(self, dx, dy, dspread):
         with self.lock:
-            k = self.sensitivity * self._accel_factor((dx * dx + dy * dy) ** 0.5)
+            k = PAN_SPEED * self.sensitivity * self._accel_factor((dx * dx + dy * dy) ** 0.5)
             self.acc_dx += dx * k
             self.acc_dy += dy * k
             if self.windows_started:
