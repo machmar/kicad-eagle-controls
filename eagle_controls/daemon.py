@@ -30,6 +30,7 @@ import queue
 import sys
 import threading
 import time
+import zlib
 from ctypes import wintypes as w
 
 # --- settings -------------------------------------------------------------
@@ -39,7 +40,8 @@ DRAG_MIN_S = 0.15          # ...and a press only becomes a drag once held this l
 CLICK_SLOP_PX = CLICK_SLOP
 CLICK_MAX_S = 0.5          # ...and must be released within this time
 WHEEL_STICKY_S = 0.35      # a scroll gesture keeps its mouse/touchpad verdict this long
-EAGLE_FRAMES = ("PCB Editor", "Footprint Editor")  # where the button remaps apply
+BOARD_FRAMES = ("PCB Editor", "Footprint Editor")       # editors with the board click settings
+SCHEMATIC_FRAMES = ("Schematic Editor", "Symbol Editor")  # editors with the schematic ones
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEBUG = os.path.exists(os.path.join(HERE, "debug"))
@@ -218,7 +220,6 @@ NAMED_KEYS = {"pgup": 0x21, "pgdn": 0x22, "end": 0x23, "home": 0x24, "left": 0x2
               "escape": 0x1B, "return": 0x0D, "enter": 0x0D}
 NAMED_KEYS.update({"f%d" % n: 0x6F + n for n in range(1, 25)})
 MODIFIER_KEYS = {"shift": VK_SHIFT, "ctrl": VK_CONTROL, "alt": VK_MENU}
-KEY_ACTIONS = ("rotate", "flip", "layer", "next_layer", "posture", "via_chooser")
 _parsed_keys = {}
 
 
@@ -251,7 +252,7 @@ def parse_key(text):
 
 
 def do_action(action, trigger):
-    """Press KiCad's hotkey for one of KEY_ACTIONS."""
+    """Press KiCad's hotkey for one of settings.KICAD_ACTIONS."""
     text = kicad_keys.get(action, "")
     if DEBUG:
         log("%s -> %s (%s)" % (trigger, action, text))
@@ -628,8 +629,13 @@ user32.IsWindowVisible.argtypes = [w.HWND]
 
 
 def _canvas_kind(canvas):
+    """"board", "schematic", or "canvas" (another KiCad canvas, e.g. the 3D viewer)."""
     title = window_text(user32.GetAncestor(canvas, GA_ROOT))
-    return "board" if any(f in title for f in EAGLE_FRAMES) else "canvas"
+    if any(f in title for f in BOARD_FRAMES):
+        return "board"
+    if any(f in title for f in SCHEMATIC_FRAMES):
+        return "schematic"
+    return "canvas"
 
 
 def _canvas_below(frame, pt):
@@ -650,7 +656,7 @@ def _canvas_below(frame, pt):
 
 
 def target(pt):
-    """"board" for a PCB/footprint editor canvas, "canvas" for another KiCad canvas, else None."""
+    """The kind of KiCad canvas under pt (see _canvas_kind), or None if it isn't one."""
     hwnd = user32.WindowFromPoint(pt)
     if not hwnd:
         return None
@@ -745,6 +751,7 @@ class BITMAP(ctypes.Structure):
 
 gdi32 = ctypes.WinDLL("gdi32")
 gdi32.DeleteObject.argtypes = [w.HANDLE]
+gdi32.GetBitmapBits.argtypes = [w.HANDLE, ctypes.c_long, ctypes.c_void_p]
 gdi32.GetObjectW.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p]
 user32.GetIconInfo.argtypes = [w.HANDLE, ctypes.POINTER(ICONINFO)]
 _cursor_shapes = {}  # cursor handle -> (hotspot x, y, width, height)
@@ -761,6 +768,11 @@ def cursor_shape():
         bm = BITMAP()
         gdi32.GetObjectW(ii.hbmMask, ctypes.sizeof(bm), ctypes.byref(bm))
         height = bm.bmHeight if ii.hbmColor else bm.bmHeight // 2  # monochrome: AND and XOR masks stacked
+        if DEBUG:  # a fingerprint of the image, to tell KiCad's cursors apart in the log
+            size = bm.bmWidthBytes * bm.bmHeight
+            bits = ctypes.create_string_buffer(size)
+            gdi32.GetBitmapBits(ii.hbmMask, size, bits)
+            _cursor_prints[ci.hCursor] = "%08x" % zlib.crc32(bits.raw)
         for hbm in (ii.hbmMask, ii.hbmColor):
             if hbm:
                 gdi32.DeleteObject(hbm)
@@ -768,10 +780,38 @@ def cursor_shape():
     return _cursor_shapes[ci.hCursor]
 
 
+_cursor_prints = {}
+
+
+def log_click(button, kind):
+    ci = CURSORINFO(cbSize=ctypes.sizeof(CURSORINFO))
+    user32.GetCursorInfo(ctypes.byref(ci))
+    shape = cursor_shape()
+    log("%s click on %s: left held=%s, cursor %s shape %s image %s" % (
+        button, kind, dragging(), ci.hCursor, shape, _cursor_prints.get(ci.hCursor)))
+
+
+# Windows' own cursors (arrow, I-beam, hand...). KiCad shows the plain arrow
+# while nothing is being moved, even with a part selected, and its own
+# cursors while a tool is busy: moving (M, or a left-button drag), dragging
+# (G), placing a new part, routing.
+user32.LoadCursorW.argtypes = [w.HINSTANCE, ctypes.c_void_p]
+user32.LoadCursorW.restype = w.HANDLE
+SYSTEM_CURSORS = {user32.LoadCursorW(None, ctypes.c_void_p(i))
+                  for i in (32512, 32513, 32514, 32515, 32516, 32640, 32641, 32642, 32643, 32644,
+                            32645, 32646, 32648, 32649, 32650, 32651, 32671, 32672)} - {None}
+# Actions that change a part, so only make sense while one is in hand.
+PART_ACTIONS = {"rotate", "flip", "sch_rotate", "sch_mirror_x", "sch_mirror_y"}
+
+
+def tool_busy():
+    """Whether KiCad shows one of its own tool cursors (moving, dragging, placing...)."""
+    ci = CURSORINFO(cbSize=ctypes.sizeof(CURSORINFO))
+    return bool(user32.GetCursorInfo(ctypes.byref(ci)) and ci.hCursor and ci.hCursor not in SYSTEM_CURSORS)
+
+
 def routing():
     shape = cursor_shape()
-    if DEBUG:
-        log("cursor hotspot/size: %s" % (shape,))
     if not shape or not shape[2] or not shape[3]:
         return False
     x, y, width, height = shape
@@ -860,7 +900,7 @@ def _kicad_tops():
 def read_copper_layers():
     """(copper layer names top to bottom, index of the active one) from the toolbar, or None."""
     for frame in _kicad_tops():
-        if not any(f in window_text(frame) for f in EAGLE_FRAMES):
+        if not any(f in window_text(frame) for f in BOARD_FRAMES):
             continue
         for combo in _kicad_children(frame, lambda h: class_name(h) == "ComboBox"):
             count = _send_timeout(combo, CB_GETCOUNT, 0, 0)
@@ -889,7 +929,7 @@ def find_layer_chooser():
         if user32.GetWindowLongW(top, GWL_STYLE) & WS_CAPTION:
             grids = _kicad_children(top, lambda h: window_text(h) == "GridWindow"
                                     and user32.IsWindowVisible(h))
-            if len(grids) == 1 and not any(f in window_text(top) for f in EAGLE_FRAMES):
+            if len(grids) == 1 and not any(f in window_text(top) for f in BOARD_FRAMES + SCHEMATIC_FRAMES):
                 return top, grids[0]
     return None
 
@@ -1041,13 +1081,24 @@ def perform(action, trigger):
         do_action(action, trigger)
 
 
-def click_action(s, button):
-    """The configured action for a right/middle click in the current situation."""
+def click_action(s, button, kind):
+    """The KiCad action (a settings.KICAD_ACTIONS key) for a right/middle click in
+    the current situation, or None to leave the click to KiCad."""
+    if kind not in ("board", "schematic"):
+        return None
+    prefix = "sch_" if kind == "schematic" else ""   # the schematic has its own settings
     if dragging():
-        return s[button + "_drag"]
-    if routing():
-        return s[button + "_route"]
-    return s[button]
+        action = s[prefix + button + "_drag"]
+    elif routing():   # the router's or the wire tool's pencil cursor
+        action = s[prefix + button + "_route"]
+    else:
+        action = s[prefix + button]
+    action = prefix + action
+    if action not in settings.KICAD_ACTIONS:
+        return None
+    if action in PART_ACTIONS and s["parts_only_while_moving"] and not (dragging() or tool_busy()):
+        return None   # a part is merely selected: leave the click to KiCad
+    return action
 
 
 def handle(msg, info):
@@ -1081,10 +1132,11 @@ def handle(msg, info):
         return False
 
     if msg == WM_RBUTTONDOWN:
-        if target(info.pt) != "board":
-            return False
-        action = click_action(user_settings.get(), "right_click")
-        if action not in KEY_ACTIONS or modifiers_held():
+        kind = target(info.pt)
+        if DEBUG and kind:
+            log_click("right", kind)
+        action = click_action(user_settings.get(), "right_click", kind)
+        if not action or modifiers_held():
             return False                          # e.g. Shift+right click: KiCad's menu
         if dragging():
             perform(action, "right click while dragging")
@@ -1105,10 +1157,12 @@ def handle(msg, info):
 
     if msg == WM_MBUTTONDOWN:
         middle = None
-        if target(info.pt) == "board":
-            action = click_action(user_settings.get(), "middle_click")
-            if action in KEY_ACTIONS:
-                middle = (info.pt.x, info.pt.y, time.perf_counter(), action)
+        kind = target(info.pt)
+        if DEBUG and kind:
+            log_click("middle", kind)
+        action = click_action(user_settings.get(), "middle_click", kind)
+        if action:
+            middle = (info.pt.x, info.pt.y, time.perf_counter(), action)
         return False
 
     if msg == WM_MBUTTONUP:

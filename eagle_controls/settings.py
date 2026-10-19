@@ -8,6 +8,7 @@ PATH = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.dirname(os.path.ab
 
 # What a click can do; the helper presses KiCad's hotkey for the matching action.
 ACTIONS = ("rotate", "flip", "layer", "next_layer", "posture", "via_chooser", "off")
+SCHEMATIC_ACTIONS = ("rotate", "mirror_x", "mirror_y", "posture", "off")  # stored without "sch_"
 
 # The KiCad actions behind them, as named in KiCad's user.hotkeys file, and
 # KiCad's default keys for when that file is missing or doesn't list one.
@@ -18,6 +19,10 @@ KICAD_ACTIONS = {
     "next_layer": ("pcbnew.Control.layerNext", "+"),                    # next copper layer down
     "posture": ("pcbnew.InteractiveRouter.SwitchPosture", "/"),
     "via_chooser": ("pcbnew.InteractiveRouter.SelLayerAndPlaceVia", "<"),  # through via, pick layer
+    "sch_rotate": ("eeschema.InteractiveEdit.rotateCCW", "R"),
+    "sch_mirror_x": ("eeschema.InteractiveEdit.mirrorH", "X"),            # left-right, like Eagle's mirror
+    "sch_mirror_y": ("eeschema.InteractiveEdit.mirrorV", "Y"),
+    "sch_posture": ("eeschema.InteractiveDrawingLineWireBus.switchPosture", "\\"),
 }
 
 DEFAULTS = {
@@ -34,6 +39,16 @@ DEFAULTS = {
     "middle_click_drag": "flip",    # middle click while dragging a part
     "middle_click_route": "via_chooser",  # middle click while routing: pick the through via's layer
     "chooser_places_via": True,    # the left click that picks the via layer also places the via
+    # Rotate/flip/mirror only while a part is in hand (left-button drag, M, G,
+    # placing), not when it's merely selected; then the click is KiCad's.
+    "parts_only_while_moving": True,
+    # Schematic and symbol editors: their own click settings (SCHEMATIC_ACTIONS)
+    "sch_right_click": "rotate",
+    "sch_right_click_drag": "rotate",
+    "sch_right_click_route": "posture",  # while drawing a wire: switch bend direction
+    "sch_middle_click": "mirror_x",      # Eagle's mirror, also while moving with M
+    "sch_middle_click_drag": "mirror_x",
+    "sch_middle_click_route": "off",
     # Misc
     "dont_ask_layout": False,       # don't remind about KiCad's trackpad scroll layout
 }

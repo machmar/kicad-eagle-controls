@@ -131,6 +131,10 @@ CLICK_ACTIONS = [("rotate", "Rotate"), ("flip", "Flip to other side"),
                  ("via_chooser", "Choose via layer (click again: next, left click: place)"),
                  ("off", "Nothing")]
 RIGHT_CLICK_ACTIONS = CLICK_ACTIONS[:6] + [("menu", "KiCad's context menu")]
+SCH_CLICK_ACTIONS = [("rotate", "Rotate"), ("mirror_x", "Mirror left-right (Eagle's mirror)"),
+                     ("mirror_y", "Mirror top-bottom"), ("posture", "Switch wire bend direction"),
+                     ("off", "Nothing")]
+SCH_RIGHT_CLICK_ACTIONS = SCH_CLICK_ACTIONS[:4] + [("menu", "KiCad's context menu")]
 
 
 def show_settings():
@@ -186,24 +190,46 @@ def show_settings():
     free_pan.Bind(wx.EVT_CHECKBOX, update)
     box.Add(grid, 0, wx.EXPAND | wx.ALL, 6)
 
-    # --- Mouse
+    # --- Mouse: the wheel is shared; the clicks differ per editor, one tab each
     box, grid, pnl = section("Mouse")
     wheel = wx.CheckBox(pnl, label="Mouse wheel zooms (otherwise it pans)")
     wheel.SetValue(values["wheel_zoom"])
     box.Add(wheel, 0, wx.ALL, 6)
-    right = choice(pnl, grid, "Right click", RIGHT_CLICK_ACTIONS, values["right_click"])
-    right_drag = choice(pnl, grid, "Right click while dragging", CLICK_ACTIONS, values["right_click_drag"])
-    right_route = choice(pnl, grid, "Right click while routing", RIGHT_CLICK_ACTIONS, values["right_click_route"])
-    middle = choice(pnl, grid, "Middle click", CLICK_ACTIONS, values["middle_click"])
-    middle_drag = choice(pnl, grid, "Middle click while dragging", CLICK_ACTIONS, values["middle_click_drag"])
-    middle_route = choice(pnl, grid, "Middle click while routing", CLICK_ACTIONS, values["middle_click_route"])
-    box.Add(grid, 0, wx.EXPAND | wx.ALL, 6)
-    places_via = wx.CheckBox(pnl, label="Left click in the via layer chooser also places the via")
+    only_moving = wx.CheckBox(pnl, label="Rotate, flip and mirror only while a part is being moved\n"
+                                         "(left button held, M, G or placing), not when just selected")
+    only_moving.SetValue(values["parts_only_while_moving"])
+    box.Add(only_moving, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+    tabs = wx.Notebook(pnl)
+    clicks = {}  # setting name -> (get, set)
+
+    def click_page(title, prefix, right_options, options, route_word):
+        page = wx.Panel(tabs)
+        page_sizer = wx.BoxSizer(wx.VERTICAL)
+        page_grid = wx.FlexGridSizer(0, 3, 8, 10)
+        page_grid.AddGrowableCol(1)
+        for setting, label, opts in (
+                ("right_click", "Right click", right_options),
+                ("right_click_drag", "Right click while dragging", options),
+                ("right_click_route", "Right click while " + route_word, right_options),
+                ("middle_click", "Middle click", options),
+                ("middle_click_drag", "Middle click while dragging", options),
+                ("middle_click_route", "Middle click while " + route_word, options)):
+            clicks[prefix + setting] = choice(page, page_grid, label, opts, values[prefix + setting])
+        page_sizer.Add(page_grid, 0, wx.EXPAND | wx.ALL, 8)
+        page.SetSizer(page_sizer)
+        tabs.AddPage(page, title)
+        return page, page_sizer
+
+    pcb_page, pcb_sizer = click_page("PCB", "", RIGHT_CLICK_ACTIONS, CLICK_ACTIONS, "routing")
+    places_via = wx.CheckBox(pcb_page, label="Left click in the via layer chooser also places the via")
     places_via.SetValue(values["chooser_places_via"])
-    box.Add(places_via, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
-    box.Add(wx.StaticText(pnl, label="“Dragging” means holding the left button on a part; “routing”\n"
-                                     "means the router's pencil cursor is showing. Shift + right click\n"
-                                     "always opens KiCad's menu. Right- and middle-button drags still pan."),
+    pcb_sizer.Add(places_via, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+    click_page("Schematic", "sch_", SCH_RIGHT_CLICK_ACTIONS, SCH_CLICK_ACTIONS, "drawing wires")
+    box.Add(tabs, 0, wx.EXPAND | wx.ALL, 6)
+    box.Add(wx.StaticText(pnl, label="\u201cDragging\u201d means holding the left button on a part; "
+                                     "\u201crouting\u201d and \u201cdrawing\nwires\u201d mean the "
+                                     "pencil cursor is showing. Shift + right click always\nopens "
+                                     "KiCad's menu. Right- and middle-button drags still pan."),
             0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
     # --- Keys
@@ -211,13 +237,14 @@ def show_settings():
     # that a click is set to use isn't bound there.
     folder = os.path.dirname(_common_json() or "")
     kicad_keys = settings.kicad_hotkeys(folder if folder else None)
-    used = {values[k] for k in ("right_click", "right_click_drag", "right_click_route",
-                                "middle_click", "middle_click_drag", "middle_click_route")}
-    unbound = [label for name, label in CLICK_ACTIONS if name in used and name in kicad_keys
-               and not kicad_keys[name]]
+    labels = dict(CLICK_ACTIONS)
+    labels.update(("sch_" + k, "schematic " + v.lower()) for k, v in SCH_CLICK_ACTIONS)
+    unbound = sorted({labels[action] for name, action in
+                      (((n, ("sch_" if n.startswith("sch_") else "") + values[n]) for n in clicks))
+                      if action in kicad_keys and not kicad_keys[action]})
     if unbound:
         warn_keys = wx.StaticText(dlg, label="No hotkey in KiCad for: %s.\nAssign one in KiCad's "
-                                             "Preferences → Hotkeys." % ", ".join(unbound))
+                                             "Preferences \u2192 Hotkeys." % ", ".join(unbound))
         warn_keys.SetForegroundColour(wx.Colour(200, 60, 0))
         outer.Add(warn_keys, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
 
@@ -238,11 +265,10 @@ def show_settings():
         sens.SetValue(0)
         accel.SetValue(0)
         wheel.SetValue(d["wheel_zoom"])
+        only_moving.SetValue(d["parts_only_while_moving"])
         places_via.SetValue(d["chooser_places_via"])
-        for (_, set_), key in ((right, "right_click"), (right_drag, "right_click_drag"),
-                               (right_route, "right_click_route"), (middle, "middle_click"),
-                               (middle_drag, "middle_click_drag"), (middle_route, "middle_click_route")):
-            set_(d[key])
+        for name, (_, set_) in clicks.items():
+            set_(d[name])
         remind.SetValue(True)
         update()
 
@@ -264,15 +290,11 @@ def show_settings():
             "pan_sensitivity": 2 ** (sens.GetValue() / 100),
             "pan_acceleration": accel.GetValue() / 100,
             "wheel_zoom": wheel.GetValue(),
-            "right_click": right[0](),
-            "right_click_drag": right_drag[0](),
-            "right_click_route": right_route[0](),
-            "middle_click": middle[0](),
-            "middle_click_drag": middle_drag[0](),
-            "middle_click_route": middle_route[0](),
             "chooser_places_via": places_via.GetValue(),
+            "parts_only_while_moving": only_moving.GetValue(),
             "dont_ask_layout": not remind.GetValue(),
         })
+        values.update({name: get() for name, (get, _) in clicks.items()})
         try:
             settings.save(values)
         except OSError as e:
@@ -284,7 +306,7 @@ class EagleControls(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = TITLE
         self.category = "Navigation"
-        self.description = ("Right click rotates, middle click switches layer, "
+        self.description = ("Right click rotates, middle click switches layer or mirrors, "
                             "mouse wheel zooms, touchpad swipe pans and pinch zooms. "
                             "Runs automatically; this menu entry opens its settings.")
         self.show_toolbar_button = False

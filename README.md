@@ -1,18 +1,34 @@
 # Eagle-style controls for KiCad
 
-A KiCad (Windows) plugin that makes the PCB and footprint editors behave like Eagle:
+A KiCad (Windows) plugin that makes the PCB, footprint, schematic and symbol editors behave like Eagle.
+
+Everywhere:
 
 | Input | Does |
 |---|---|
-| Touchpad two-finger swipe, in any direction including diagonal | Pans the board |
+| Touchpad two-finger swipe, in any direction including diagonal | Pans |
 | Touchpad pinch | Zooms |
 | Mouse wheel | Zooms |
-| Right click on the board | Rotates (sends `R`) the part you're placing, moving (`M`) or dragging, or the selection, instead of opening the context menu. Shift + right click still opens the menu. |
-| Middle click while dragging a part | Flips it to the other side (sends `F`), like Eagle's mirror |
-| Right click while routing | Switches the bend direction (sends `/`) |
-| Middle click otherwise, and while routing | Goes to the next copper layer down (sends `+`), wrapping from B.Cu back to F.Cu; while routing that places a via. The active layer shows in the toolbar's layer selector. |
 
-Middle- and right-button drags still pan. Every one of these can be changed or turned off in the settings.
+PCB and footprint editor:
+
+| Input | Does |
+|---|---|
+| Right click while moving a part (left button held, `M`, `G`, or placing a new one) | Rotates it |
+| Middle click while moving a part | Flips it to the other side, like Eagle's mirror |
+| Middle click otherwise | Goes to the next copper layer down, wrapping from B.Cu back to F.Cu |
+| Right click while routing | Switches the bend direction |
+| Middle click while routing | Opens KiCad's "Select Layer and Place Through Via" chooser with a highlight on the next layer down. Middle click again moves the highlight; left click places a through via on that layer. Esc cancels. |
+
+Schematic and symbol editor:
+
+| Input | Does |
+|---|---|
+| Right click while moving a part | Rotates it |
+| Middle click while moving a part | Mirrors it left-right, like Eagle's mirror |
+| Right click while drawing a wire | Switches the bend direction |
+
+A part that is only selected isn't touched: then right click opens KiCad's menu as usual. Shift + right click always opens the menu, and middle- and right-button drags still pan. Every one of these can be changed or turned off in the settings.
 
 ## Install
 
@@ -26,15 +42,15 @@ Middle- and right-button drags still pan. Every one of these can be changed or t
 
 This copies `eagle_controls/` to `Documents\KiCad\10.0\scripting\plugins\` and sets the trackpad scroll layout for you (it backs up `kicad_common.json` first).
 
-The plugin starts automatically when the PCB editor opens. It runs a helper process (`daemon.py`, using KiCad's own `pythonw.exe`) that exits when KiCad closes. If the helper dies, the plugin restarts it.
+The plugin starts automatically when the PCB editor opens, and then also covers the schematic editor in the same KiCad window. (Opened on its own, without the PCB editor, the schematic editor isn't covered.) It runs a helper process (`daemon.py`, using KiCad's own `pythonw.exe`) that exits when KiCad closes. If the helper dies, the plugin restarts it.
 
 ## Settings
 
 **PCB Editor → Tools → External Plugins → Eagle-style controls** opens the settings. Each Eagle-style behaviour can be changed or switched back to KiCad's own:
 
 - **Touchpad:** free two-axis panning on/off (off leaves Windows' axis-locked scrolling), **pan sensitivity** (0.25× to 4× your Windows touchpad speed) and **pan acceleration** (off to 100%; slow swipes pan finer, fast swipes further).
-- **Mouse:** wheel zooms on/off (off: it pans). **Right click** and **middle click**, each set separately for normal use, while dragging a part and while routing, can rotate, flip, go to the next layer, toggle the layer pair, switch the bend direction, or do nothing extra. For plain right click, "nothing extra" means KiCad's context menu. "Dragging" means holding the left button on a part; "routing" means the router's pencil cursor is showing.
-- **Hotkeys** aren't set here: the plugin uses whatever keys KiCad has for rotate, flip, next layer, layer pair, bend direction and "Select Layer and Place Through Via" (Preferences → Hotkeys, read from KiCad's `user.hotkeys`). The window only warns if a click uses an action that has no key in KiCad.
+- **Mouse:** wheel zooms on/off (off: it pans), and whether rotate/flip/mirror wait until a part is being moved. The **PCB** and **Schematic** tabs set what right and middle click do, separately for normal use, while dragging a part and while routing or drawing wires: rotate, flip or mirror, next layer, toggle the layer pair, switch the bend direction, the via layer chooser, or nothing extra (for right click: KiCad's context menu). "Dragging" means holding the left button on a part; "moving" also covers `M`, `G` and placing, recognised by KiCad's tool cursor; "routing" means the pencil cursor is showing. The PCB tab also sets whether the left click in the via chooser places the via.
+- **Hotkeys** aren't set here: the plugin uses whatever keys KiCad has for rotate, flip, mirror, next layer, layer pair, bend direction and "Select Layer and Place Through Via" (Preferences → Hotkeys, read from KiCad's `user.hotkeys`). The window only warns if a click uses an action that has no key in KiCad.
 - **Reminder** about KiCad's trackpad scroll layout on/off.
 
 Changes apply right away. Settings are stored in `%LOCALAPPDATA%\kicad_eagle_controls_prefs.json`. Mouse-wheel zoom speed is KiCad's own setting, in Preferences → Mouse and Touchpad.
