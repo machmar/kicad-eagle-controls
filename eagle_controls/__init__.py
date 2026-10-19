@@ -199,6 +199,9 @@ def show_settings():
                                          "(left button held, M, G or placing), not when just selected")
     only_moving.SetValue(values["parts_only_while_moving"])
     box.Add(only_moving, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+    no_dclick = wx.CheckBox(pnl, label="Middle double-click doesn't zoom to fit (triple-click does)")
+    no_dclick.SetValue(values["block_middle_double_click"])
+    box.Add(no_dclick, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
     tabs = wx.Notebook(pnl)
     clicks = {}  # setting name -> (get, set)
 
@@ -266,6 +269,7 @@ def show_settings():
         accel.SetValue(0)
         wheel.SetValue(d["wheel_zoom"])
         only_moving.SetValue(d["parts_only_while_moving"])
+        no_dclick.SetValue(d["block_middle_double_click"])
         places_via.SetValue(d["chooser_places_via"])
         for name, (_, set_) in clicks.items():
             set_(d[name])
@@ -292,6 +296,7 @@ def show_settings():
             "wheel_zoom": wheel.GetValue(),
             "chooser_places_via": places_via.GetValue(),
             "parts_only_while_moving": only_moving.GetValue(),
+            "block_middle_double_click": no_dclick.GetValue(),
             "dont_ask_layout": not remind.GetValue(),
         })
         values.update({name: get() for name, (get, _) in clicks.items()})

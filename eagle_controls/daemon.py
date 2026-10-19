@@ -617,6 +617,9 @@ swallow_right_up = False
 right_pending = None   # (x, y, time, action) of a held-back right press: act on release, or pan if it moves
 left_down = False      # tracked here: GetAsyncKeyState can miss it from another process
 swallow_up = None      # button-up message to swallow because we took its button-down
+last_middle_down = None  # (time, x, y) of the previous middle press, to spot double-clicks
+hide_middle_up = False   # we hid this middle press from KiCad, so hide its release too
+SM_CXDOUBLECLK, SM_CYDOUBLECLK = 36, 37
 
 
 GWL_STYLE, WS_CAPTION = -16, 0x00C00000
@@ -1103,7 +1106,7 @@ def click_action(s, button, kind):
 
 def handle(msg, info):
     """Return True to swallow the event."""
-    global middle, swallow_right_up, right_pending, left_down, swallow_up
+    global middle, swallow_right_up, right_pending, left_down, swallow_up, last_middle_down, hide_middle_up
 
     # While our highlight is over KiCad's via layer chooser, a left click picks
     # the highlighted layer and a middle click moves the highlight.
@@ -1160,15 +1163,31 @@ def handle(msg, info):
         kind = target(info.pt)
         if DEBUG and kind:
             log_click("middle", kind)
-        action = click_action(user_settings.get(), "middle_click", kind)
+        s = user_settings.get()
+        action = click_action(s, "middle_click", kind)
+        now = time.perf_counter()
         if action:
-            middle = (info.pt.x, info.pt.y, time.perf_counter(), action)
+            middle = (info.pt.x, info.pt.y, now, action)
+        # The second press of a double-click: KiCad would zoom to fit. Hide it
+        # from KiCad if asked to; our own click action still runs on release.
+        scale = CLICK_SLOP_PX / CLICK_SLOP  # the metrics are in 96-dpi pixels, the hook's in physical ones
+        second = (last_middle_down is not None
+                  and now - last_middle_down[0] <= user32.GetDoubleClickTime() / 1000
+                  and abs(info.pt.x - last_middle_down[1]) <= user32.GetSystemMetrics(SM_CXDOUBLECLK) * scale
+                  and abs(info.pt.y - last_middle_down[2]) <= user32.GetSystemMetrics(SM_CYDOUBLECLK) * scale)
+        last_middle_down = None if second else (now, info.pt.x, info.pt.y)
+        if second and kind and s["block_middle_double_click"]:
+            hide_middle_up = True
+            return True
         return False
 
     if msg == WM_MBUTTONUP:
         if middle and time.perf_counter() - middle[2] < CLICK_MAX_S:
             perform(middle[3], "middle click")
         middle = None
+        if hide_middle_up:
+            hide_middle_up = False
+            return True
         return False
 
     if msg in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL):

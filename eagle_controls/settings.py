@@ -42,6 +42,8 @@ DEFAULTS = {
     # Rotate/flip/mirror only while a part is in hand (left-button drag, M, G,
     # placing), not when it's merely selected; then the click is KiCad's.
     "parts_only_while_moving": True,
+    "block_middle_double_click": False,  # hide middle double-clicks from KiCad (no zoom to fit;
+                                         # a triple click still reaches KiCad as a double-click)
     # Schematic and symbol editors: their own click settings (SCHEMATIC_ACTIONS)
     "sch_right_click": "rotate",
     "sch_right_click_drag": "rotate",
