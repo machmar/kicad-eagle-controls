@@ -50,6 +50,15 @@ The helper uses a Windows low-level mouse hook, and only acts on input aimed at 
 - Wheel-to-zoom also applies to the schematic and other editors in the same KiCad process. The helper only runs once the PCB editor has opened, though. If you run the schematic editor alone, the mouse wheel pans there because of the trackpad scroll settings.
 - Only the OpenGL canvas is handled. The fallback renderer isn't.
 
+## Publishing
+
+KiCad's Plugin and Content Manager lists packages from the [KiCad addon metadata repository](https://gitlab.com/kicad/addons/metadata). To publish a version:
+
+1. Bump `version` in `metadata.json`, then run `python build_pcm.py`. It writes the zip and `dist/submission/packages/com.github.machmar.eagle-controls/` (`metadata.json` with download URL, SHA-256 and sizes, plus `icon.png`).
+2. Upload the zip from that same run to the GitHub release `v<version>`: `gh release upload v<version> dist/eagle-controls-<version>.zip --clobber`. The SHA-256 must match the uploaded file.
+3. The repository must be public and the release must not be a draft, so PCM can download it.
+4. Fork the addon metadata repository on GitLab, copy the `packages/...` folder in (for a later version, add the new `versions` entry to the existing file), and open a merge request.
+
 ## Troubleshooting
 
 Create an empty file named `debug` in the installed `eagle_controls` folder and restart KiCad. Wheel classification, touchpad gestures and calibration are then logged to `%TEMP%\kicad_eagle_controls.log`. That file always records the helper starting and stopping, and any crashes.
