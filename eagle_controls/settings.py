@@ -61,7 +61,7 @@ DEFAULTS = {
     "block_middle_double_click": False,  # hide middle double-clicks from KiCad (no zoom to fit;
                                          # a triple click still reaches KiCad as a double-click)
     # PCB and footprint editors: a PCB_ACTIONS or NO_ACTION key for each click.
-    # "_drag": while dragging a part with the left button; "_route": while routing (pencil cursor).
+    # "_drag": while moving a part (left-button drag, M, G, placing); "_route": while routing (pencil cursor).
     "right_click": "rotate",
     "right_click_drag": "rotate",
     "right_click_route": "posture",

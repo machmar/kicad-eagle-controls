@@ -13,10 +13,10 @@ from . import settings
 WARNING_COLOUR = wx.Colour(200, 60, 0)
 # The rows of a click tab: (setting suffix, label, whether it's a right click)
 CLICK_ROWS = [("right_click", "Right click", True),
-              ("right_click_drag", "Right click while dragging", False),
+              ("right_click_drag", "Right click while moving a part", False),
               ("right_click_route", "Right click while {}", True),
               ("middle_click", "Middle click", False),
-              ("middle_click_drag", "Middle click while dragging", False),
+              ("middle_click_drag", "Middle click while moving a part", False),
               ("middle_click_route", "Middle click while {}", False)]
 
 
@@ -113,9 +113,9 @@ def show(trackpad_layout, hotkeys_file):
         page.SetSizer(page_sizer)
         tabs.AddPage(page, title)
     box.Add(tabs, 0, wx.EXPAND | wx.ALL, 6)
-    box.Add(wx.StaticText(pnl, label="“Dragging” means holding the left button on a part; "
-                                     "“routing” and “drawing\nwires” mean the "
-                                     "pencil cursor is showing. Shift + right click always\nopens "
+    box.Add(wx.StaticText(pnl, label="“Moving a part” means holding the left button on it, M, G or\n"
+                                     "placing a new one; “routing” and “drawing wires” mean the\n"
+                                     "pencil cursor is showing. Shift + right click always opens\n"
                                      "KiCad's menu. Right- and middle-button drags still pan."),
             0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 

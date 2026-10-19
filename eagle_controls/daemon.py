@@ -153,6 +153,8 @@ class Mouse:
             situation = "_drag"
         elif kicad.routing():  # the router's or the wire tool's pencil cursor
             situation = "_route"
+        elif kicad.tool_busy():  # moving with M or G, or placing a new part
+            situation = "_drag"
         else:
             situation = ""
         action = prefix + prefs[prefix + button + situation]
