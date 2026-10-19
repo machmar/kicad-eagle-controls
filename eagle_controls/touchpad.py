@@ -12,16 +12,15 @@ read from the device's HID descriptor with the HidP_* parser.
 import ctypes
 from ctypes import wintypes as w
 
+from winapi import RIDI_PREPARSEDDATA, user32
+
 hid = ctypes.WinDLL("hid")
-user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 PAGE_GENERIC, PAGE_DIGITIZER = 0x01, 0x0D
 USAGE_X, USAGE_Y = 0x30, 0x31
 USAGE_TOUCHPAD, USAGE_TIP, USAGE_CONTACT_ID, USAGE_CONTACT_COUNT = 0x05, 0x42, 0x51, 0x54
 HidP_Input = 0
 HIDP_STATUS_SUCCESS = 0x00110000
-RIDI_PREPARSEDDATA = 0x20000005
-RIM_TYPEHID = 2
 
 
 class HIDP_CAPS(ctypes.Structure):
@@ -57,8 +56,6 @@ hid.HidP_GetUsageValue.restype = ctypes.c_ulong
 hid.HidP_GetUsages.argtypes = [ctypes.c_int, w.USHORT, w.USHORT, ctypes.POINTER(w.USHORT), ctypes.POINTER(w.ULONG),
                                ctypes.c_void_p, ctypes.c_char_p, w.ULONG]
 hid.HidP_GetUsages.restype = ctypes.c_ulong
-user32.GetRawInputDeviceInfoW.argtypes = [w.HANDLE, w.UINT, w.LPVOID, ctypes.POINTER(w.UINT)]
-user32.GetRawInputDeviceInfoW.restype = w.UINT
 
 
 def _mm_per_unit(cap, fallback_mm):
@@ -137,7 +134,7 @@ def _dist(p, q):
 class Touchpads:
     """Tracks fingers on all touchpads and reports two-finger motion.
 
-    Call feed() with every WM_INPUT lParam that came from a touchpad.
+    Call feed() with the raw input of every report that came from a touchpad.
     `fingers` is the number of fingers down. on_motion(dx_mm, dy_mm, dspread_mm)
     is called for each frame in which exactly two fingers moved: the average
     motion (+y is towards the user) and the change in distance between them.

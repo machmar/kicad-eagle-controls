@@ -20,7 +20,6 @@ import shutil
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PLUGIN_FILES = ["__init__.py", "daemon.py", "touchpad.py", "settings.py", "icon.png"]
 RELEASE_URL = "https://github.com/machmar/kicad-eagle-controls/releases/download/v{0}/eagle-controls-{0}.zip"
 
 
@@ -37,8 +36,9 @@ def main():
     install_size = 0
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("metadata.json", json.dumps(meta, indent=2))
-        for name in PLUGIN_FILES:
-            src = os.path.join(HERE, "eagle_controls", name)
+        plugin = os.path.join(HERE, "eagle_controls")
+        for name in sorted(n for n in os.listdir(plugin) if n.endswith((".py", ".png"))):
+            src = os.path.join(plugin, name)
             z.write(src, "plugins/" + name)
             install_size += os.path.getsize(src)
         z.write(icon, "resources/icon.png")

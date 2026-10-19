@@ -18,9 +18,13 @@ import time
 
 VERSION = sys.argv[1] if len(sys.argv) > 1 else "10.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
-WXK_SHIFT, WXK_CONTROL = 306, 308
-TRACKPAD = {"scroll_modifier_zoom": WXK_CONTROL, "scroll_modifier_pan_v": 0,
-            "scroll_modifier_pan_h": WXK_SHIFT, "horizontal_pan": True}
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.join(HERE, "eagle_controls"))
+import settings  # noqa: E402
+
+WXK_SHIFT = 306
+TRACKPAD = dict(settings.TRACKPAD_LAYOUT, scroll_modifier_pan_h=WXK_SHIFT)  # Shift+scroll pans sideways too
 
 
 def kicad_running():
@@ -41,6 +45,8 @@ def main():
     print("Plugin installed to", dest)
 
     common = os.path.join(os.environ["APPDATA"], "kicad", VERSION, "kicad_common.json")
+    if not os.path.isfile(common):
+        sys.exit("%s not found: start KiCad %s once, close it, and run this again." % (common, VERSION))
     with open(common, encoding="utf-8") as f:
         cfg = json.load(f)
     if all(cfg.get("input", {}).get(k) == v for k, v in TRACKPAD.items()):

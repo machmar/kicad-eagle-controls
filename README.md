@@ -63,6 +63,22 @@ The helper uses a Windows low-level mouse hook, and only acts on input aimed at 
 - **Touchpad panning:** Windows locks two-finger scrolling to one axis. The helper reads finger contacts directly from Precision Touchpads (`touchpad.py`, HID raw input). It decides whether the gesture is a pan (fingers move together) or a pinch (fingers spread or close). Over a KiCad canvas, it swallows Windows' scroll events and pans from the real finger motion, at most once per frame. The speed and direction are calibrated against Windows' own scroll events and saved in `%LOCALAPPDATA%\kicad_eagle_controls.json`.
 - **Clicks:** a right press is held back until release. If the mouse moves first, it's handed to KiCad so right-drag still pans. Middle clicks pass through and the action follows on release. The keys sent are read from KiCad's `user.hotkeys` and re-read when it changes; click timings are constants at the top of `daemon.py`.
 
+## Code
+
+In `eagle_controls/`, the plugin side (runs inside KiCad):
+
+- `__init__.py`: starts the helper and keeps it running, and registers the menu entry.
+- `dialog.py`: the settings window.
+- `settings.py`: the settings, their defaults and the click actions, plus reading KiCad's hotkeys and scroll layout. The helper uses it too.
+
+The helper (`pythonw.exe daemon.py <kicad pid>`):
+
+- `daemon.py`: entry point, the mouse hook and what each click and wheel event does, and raw input.
+- `kicad.py`: what KiCad is doing, seen from outside (the canvas under the mouse, the tool from its cursor), and pressing its hotkeys.
+- `pan.py`: touchpad panning and its speed calibration. `touchpad.py` reads the finger contacts for it.
+- `via_chooser.py`: the highlight over KiCad's via layer chooser.
+- `winapi.py`, `logfile.py`: Win32 declarations, and the log (`%TEMP%\kicad_eagle_controls.log`; an empty file named `debug` in the plugin folder makes it detailed).
+
 ## Limitations
 
 - Windows only.
