@@ -20,9 +20,10 @@ from a mouse are re-sent with Ctrl held to make them zoom.
 
 The pieces, each on its own thread:
   Hook (here)          the mouse hook; Mouse decides what each message does
-  raw_input_thread     raw input: touchpad fingers for pan.py, and which wheel is a mouse's
+  raw_input_thread     raw input: touchpad fingers for pan.py, which wheel is a mouse's, Esc
   Pan.run (pan.py)     sends the touchpad pan to KiCad
   LayerChooser.run     the via layer chooser (via_chooser.py)
+  Placement.run        whether a new footprint is on the cursor (kicad.py)
   refresher            re-reads the settings files, and reinstalls the hook if Windows dropped it
   input_sender, logfile.writer
                        inject input and write the log, which the hook itself must never wait on
@@ -48,10 +49,11 @@ from via_chooser import LayerChooser, OPEN, PICK, STEP  # noqa: E402
 from winapi import (  # noqa: E402
     ABOVE_NORMAL_PRIORITY_CLASS, ERROR_ALREADY_EXISTS, HOOKPROC, HWND_MESSAGE, INFINITE, INJECTED_TAG, LLMHF_INJECTED,
     MOUSEEVENTF_RIGHTDOWN, MSLLHOOKSTRUCT, RAWINPUTDEVICE, RAWINPUTHEADER, RI_MOUSE_WHEEL, RID_INPUT, RIDEV_INPUTSINK,
-    RIM_TYPEHID, RIM_TYPEMOUSE, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SYNCHRONIZE, THREAD_PRIORITY_TIME_CRITICAL, VK_CONTROL,
-    VK_LBUTTON, WH_MOUSE_LL, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    RI_KEY_BREAK, RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SYNCHRONIZE, THREAD_PRIORITY_TIME_CRITICAL, VK_CONTROL,
+    VK_ESCAPE, VK_LBUTTON, WH_MOUSE_LL, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDPROC, create_window, input_sender,
-    kernel32, key_down, key_input, message_loop, modifiers_held, mouse_input, send_input_later, user32, wheel_input)
+    class_name, kernel32, key_down, key_input, message_loop, modifiers_held, mouse_input, send_input_later, user32,
+    wheel_input, window_pid)
 
 # --- timings ---------------------------------------------------------------------
 
@@ -142,6 +144,10 @@ class Mouse:
     def dragging(self):
         return self.left_down or key_down(VK_LBUTTON)
 
+    def moving(self, kind):
+        """Whether a part is in hand: dragged with the left button, moved with M or G, or being placed."""
+        return self.dragging() or kicad.tool_busy() or (kind == "board" and kicad.placement.in_hand)
+
     def click_action(self, button, kind):
         """The action (a settings.KICAD_ACTIONS key) for a "right_click" or "middle_click"
         on a canvas of that kind just now, or None to leave the click to KiCad."""
@@ -153,7 +159,7 @@ class Mouse:
             situation = "_drag"
         elif kicad.routing():  # the router's or the wire tool's pencil cursor
             situation = "_route"
-        elif kicad.tool_busy():  # moving with M or G, or placing a new part
+        elif self.moving(kind):
             situation = "_drag"
         else:
             situation = ""
@@ -161,18 +167,21 @@ class Mouse:
         if action not in settings.KICAD_ACTIONS:
             return None
         if (action in settings.PART_ACTIONS and prefs["parts_only_while_moving"]
-                and not (self.dragging() or kicad.tool_busy())):
+                and not self.moving(kind)):
             return None  # a part is merely selected: leave the click to KiCad
         return action
 
     def _canvas(self, button, pt):
         kind = kicad.canvas_at(pt)
-        if DEBUG and kind:
-            log("%s click on %s: left held=%s, %s" % (button, kind, self.dragging(), kicad.describe_cursor()))
+        if DEBUG:
+            under = user32.WindowFromPoint(pt)
+            log("%s click on %s (%r, pid %d): left held=%s, %s" % (
+                button, kind, class_name(under), window_pid(under), self.dragging(), kicad.describe_cursor()))
         return kind
 
     def left_press(self, msg, info):
         self.left_down = True
+        kicad.placement.left_press(info.pt)
         return False
 
     def left_release(self, msg, info):
@@ -342,6 +351,12 @@ def on_raw_input(lparam, age_s):
         return  # injected input
     if header.dwType == RIM_TYPEHID:
         pan.feed(header.hDevice, buf.raw[hdr:size.value], age_s)
+    elif header.dwType == RIM_TYPEKEYBOARD:
+        # RAWKEYBOARD: MakeCode, Flags, Reserved, VKey
+        flags = int.from_bytes(buf.raw[hdr + 2:hdr + 4], "little")
+        vkey = int.from_bytes(buf.raw[hdr + 6:hdr + 8], "little")
+        if vkey == VK_ESCAPE and not flags & RI_KEY_BREAK:
+            kicad.placement.escape()
     elif header.dwType == RIM_TYPEMOUSE:
         # RAWMOUSE: usFlags, 2 bytes padding, usButtonFlags, usButtonData
         flags = int.from_bytes(buf.raw[hdr + 4:hdr + 6], "little")
@@ -353,7 +368,8 @@ def on_raw_input(lparam, age_s):
 
 
 def raw_input_thread():
-    """Thread: a message-only window that gets raw input from mice and touchpads, whichever window has focus."""
+    """Thread: a message-only window that gets raw input from mice, touchpads and keyboards
+    (only Esc is looked at), whichever window has focus."""
 
     def wndproc(hwnd, msg, wparam, lparam):
         if msg == WM_INPUT:
@@ -366,9 +382,10 @@ def raw_input_thread():
 
     raw_input_thread.wndproc = WNDPROC(wndproc)  # keep a reference
     hwnd = create_window("KiCadEagleControlsRaw", raw_input_thread.wndproc, parent=HWND_MESSAGE)
-    devices = (RAWINPUTDEVICE * 2)(RAWINPUTDEVICE(0x01, 0x02, RIDEV_INPUTSINK, hwnd),  # mice
-                                   RAWINPUTDEVICE(0x0D, 0x05, RIDEV_INPUTSINK, hwnd))  # precision touchpads
-    if not user32.RegisterRawInputDevices(devices, 2, ctypes.sizeof(RAWINPUTDEVICE)):
+    devices = (RAWINPUTDEVICE * 3)(RAWINPUTDEVICE(0x01, 0x02, RIDEV_INPUTSINK, hwnd),  # mice
+                                   RAWINPUTDEVICE(0x0D, 0x05, RIDEV_INPUTSINK, hwnd),  # precision touchpads
+                                   RAWINPUTDEVICE(0x01, 0x06, RIDEV_INPUTSINK, hwnd))  # keyboards
+    if not user32.RegisterRawInputDevices(devices, len(devices), ctypes.sizeof(RAWINPUTDEVICE)):
         log("RegisterRawInputDevices failed: %d" % ctypes.get_last_error())
     message_loop()
 
@@ -443,7 +460,8 @@ def main():
     kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS)
     settings.prefs.refresh()
     kicad.init(kicad_pid, common_json)
-    for run in (logfile.writer, input_sender, pan.run, raw_input_thread, hook.run, refresher, chooser.run):
+    for run in (logfile.writer, input_sender, pan.run, raw_input_thread, hook.run, refresher, chooser.run,
+                kicad.placement.run):
         threading.Thread(target=run, name=run.__qualname__, daemon=True).start()
     log("started for KiCad pid %d" % kicad_pid)
     if DEBUG:

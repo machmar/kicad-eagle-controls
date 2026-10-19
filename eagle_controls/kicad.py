@@ -12,7 +12,7 @@ import zlib
 
 import settings
 from logfile import DEBUG, log
-from winapi import (BITMAP, CURSORINFO, GA_ROOT, GWL_STYLE, ICONINFO, VK_CONTROL, VK_MENU, VK_SHIFT, WM_NULL,
+from winapi import (BITMAP, CURSORINFO, GA_ROOT, GW_OWNER, GWL_STYLE, ICONINFO, VK_CONTROL, VK_MENU, VK_SHIFT, WM_NULL,
                     class_name, contains, cursor_pos, find_windows, gdi32, has_caption, key_input,
                     send_input_later, send_message_timeout, user32, window_pid, window_rect, window_text)
 
@@ -119,6 +119,59 @@ def wait_until_drawn():
         left_ms = int((deadline - time.perf_counter()) * 1000)
         if left_ms <= 0 or send_message_timeout(hwnd, WM_NULL, 0, 0, left_ms) is None:
             break
+
+
+# --- placing a footprint -------------------------------------------------------
+
+FOOTPRINT_CHOOSER = "Footprint Chooser"  # its title goes on: " (15602 items loaded)"
+
+
+class Placement:
+    """Whether a new footprint is on the cursor, waiting to be placed.
+
+    While placing a footprint KiCad shows the plain arrow, so the cursor can't
+    tell (moving with M or G, and placing a symbol, show KiCad's own cursors).
+    Instead: when KiCad's footprint chooser closes, unless it was cancelled,
+    the footprint is in hand until a left click places it or Esc drops it.
+    """
+
+    def __init__(self):
+        self.in_hand = False
+        self.chooser = None      # the open footprint chooser
+        self.cancelled = False   # Esc or Cancel while it was open
+
+    def run(self):
+        """Thread: notice the chooser opening (within 0.2 s) and closing (within 20 ms)."""
+        while True:
+            if self.chooser:
+                time.sleep(0.02)
+                if not (user32.IsWindow(self.chooser) and user32.IsWindowVisible(self.chooser)):
+                    self.chooser, self.in_hand = None, not self.cancelled
+                    if DEBUG:
+                        log("footprint chooser closed: %s" % ("cancelled" if self.cancelled else "footprint in hand"))
+            else:
+                time.sleep(0.2)
+                self.chooser = find_windows(lambda h: is_kicad(h) and user32.IsWindowVisible(h)
+                                            and window_text(h).startswith(FOOTPRINT_CHOOSER)
+                                            and "PCB Editor" in window_text(user32.GetWindow(h, GW_OWNER)),
+                                            first=True)
+                if self.chooser:  # opened by the PCB editor to place a footprint
+                    self.in_hand = self.cancelled = False
+
+    def left_press(self, pt):
+        """A left click places the footprint; one on the chooser's Cancel button cancels it."""
+        self.in_hand = False
+        if self.chooser:
+            button = user32.WindowFromPoint(pt)
+            if class_name(button) == "Button" and window_text(button).replace("&", "") == "Cancel":
+                self.cancelled = True
+
+    def escape(self):
+        self.in_hand = False
+        self.cancelled = bool(self.chooser)
+
+
+placement = Placement()
 
 
 # --- the cursor ----------------------------------------------------------------
