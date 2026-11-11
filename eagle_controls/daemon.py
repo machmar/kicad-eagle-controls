@@ -68,6 +68,7 @@ CLICK_SLOP = 10            # a click may move this many (96-dpi) pixels; scaled 
 DRAG_MIN_S = 0.15          # ...and a press only becomes a drag once held this long
 DRAG_SLOP = 3              # KiCad drags a part once the left button moves it this many (96-dpi) pixels
 CLICK_MAX_S = 0.5          # a middle click must be released within this time
+PEN_TWIN_S = 0.3           # a right click and a pen side button this close together are the same press
 WHEEL_STICKY_S = 0.35      # a scroll gesture keeps its mouse/touchpad verdict this long
 HOOK_SILENT_S = 0.5        # mouse moved but the hook wasn't called for this long: Windows dropped it
 REFRESH_S = 0.25           # how often refresher() looks at the files and the hook
@@ -123,6 +124,9 @@ class Mouse:
         self.right = None        # Press held back from KiCad: its action runs on release, or KiCad pans if it moves
         self.middle = None       # Press whose action runs on release, unless it moves (a pan)
         self.last_middle = None  # (time, x, y) of the previous middle press, to spot double-clicks
+        # When the right button / the pen's side button last acted while dragging. Some pen
+        # drivers make a right click of the side button themselves: then both arrive, once.
+        self.right_drag_t = self.pen_drag_t = -1.0
         self.hidden = set()      # button-up messages to hide because their button-down was hidden
         self.wheel = WheelSource()
         self.handlers = {WM_LBUTTONDOWN: self.left_press, WM_LBUTTONUP: self.left_release,
@@ -159,13 +163,14 @@ class Mouse:
 
         That's while dragging one with the left button (KiCad shows its move
         cursor then; the selection box has its own), and from when a key picks
-        one up (M, G, Ctrl+D, Ctrl+V...) or a chooser hands over a new one,
-        until a left click puts it down or Esc (kicad.Holding). A part that's
+        one up (M, G, Ctrl+D, Ctrl+V...; while the move cursor shows) or a
+        chooser hands over a new one, until a left click puts it down or Esc
+        (kicad.Holding). A part that's
         only selected isn't held, even with the left button down on it.
         """
         if self.dragging() and self.left_dragged and kicad.move_cursor():
             return True
-        return kind is not None and kicad.holding.kind == kind
+        return kicad.holding.holds(kind)
 
     def click_action(self, button, kind):
         """The action (a settings.KICAD_ACTIONS key) for a "right_click" or "middle_click"
@@ -226,7 +231,10 @@ class Mouse:
         if not action or modifiers_held():
             return False  # e.g. Shift+right click: KiCad's menu
         if self.dragging():
-            perform(action, "right click while dragging", info.pt)
+            now = time.perf_counter()
+            if now - self.pen_drag_t > PEN_TWIN_S:  # else the pen's side button did it already
+                self.right_drag_t = now
+                perform(action, "right click while dragging", info.pt)
             return self._hide_press(msg)
         self.right = Press(info.pt.x, info.pt.y, time.perf_counter(), action)  # decided on release or movement
         return True
@@ -235,13 +243,17 @@ class Mouse:
         """A pen's side button went down with its tip on the screen (raw input thread).
 
         The tip is the left button, so this is a right click while the left
-        button is held, except that Windows makes no mouse input of it.
+        button is held, except that Windows makes no mouse input of it. (Some
+        pen drivers do: then the right click acts and this doesn't, or the
+        other way round, whichever comes first.)
         """
         pt = cursor_pos()
-        if not self.dragging():
+        now = time.perf_counter()
+        if not self.dragging() or now - self.right_drag_t <= PEN_TWIN_S:
             return
         action = self.click_action("right_click", self._canvas("pen side button", pt))
         if action:
+            self.pen_drag_t = now
             perform(action, "pen side button while dragging", pt)
 
     def right_release(self, msg, info):

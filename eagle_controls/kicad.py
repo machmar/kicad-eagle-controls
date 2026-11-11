@@ -213,15 +213,17 @@ def _chooser_kind(hwnd):
 
 
 def _pressed(vk, keys):
-    """Whether the key vk going down, with the modifiers held now, is one of keys (KiCad hotkey texts)."""
+    """Which of keys [(KiCad hotkey text, extra)] the key vk going down is, with the modifiers held now:
+    its (text, extra), or None."""
     held = {m for m in (VK_SHIFT, VK_CONTROL, VK_MENU) if key_down(m)}
-    for text in keys:
+    for key in keys:
+        text = key[0]
         if text not in _combos:
             _combos[text] = _combo(text)
         combo = _combos[text]
         if combo and combo[1] == vk and set(combo[0]) == held:
-            return True
-    return False
+            return key
+    return None
 
 
 class Holding:
@@ -230,17 +232,21 @@ class Holding:
 
     A chooser closing, unless it was cancelled, puts the new part in hand.
     The keys only count on a canvas that has the keyboard focus, not while
-    typing in a text field.
+    typing in a text field, and only while KiCad then shows its move cursor:
+    a key that found nothing to pick up (M with nothing selected or under the
+    mouse) leaves the arrow. KiCad shows the move cursor over a selected part
+    too, but after such a key nothing is selected: else it would be moving.
     """
 
     def __init__(self):
         self.kind = None         # the kind of editor ("board", "schematic") with a part in hand, or None
+        self.by_key = False      # picked up by a key, so only held while the move cursor shows
         self.chooser = None      # the open part chooser
         self.chooser_kind = None
         self.cancelled = False   # Esc or Cancel while it was open
 
-    def _pick_up(self, kind, how):
-        self.kind = kind
+    def _pick_up(self, kind, how, by_key=False):
+        self.kind, self.by_key = kind, by_key
         if DEBUG:
             log("part in hand (%s, %s)" % (how, kind))
 
@@ -276,11 +282,16 @@ class Holding:
             self.cancelled = bool(self.chooser)
             return
         keys = hold_hotkeys.value or {}
-        kind = next((k for k, ks in keys.items() if _pressed(vk, ks)), None)
-        if kind:
+        if any(_pressed(vk, ks) for ks in keys.values()):
             canvas = focused_canvas()
-            if canvas in keys and _pressed(vk, keys[canvas]):
-                self._pick_up(canvas, "key")
+            key = canvas in keys and _pressed(vk, keys[canvas])
+            if key:
+                text, router_drag = key
+                self._pick_up(canvas, "key " + text, by_key=not router_drag)
+
+    def holds(self, kind):
+        """Whether a part is in hand in that kind of editor (see above)."""
+        return self.kind is not None and self.kind == kind and (not self.by_key or move_cursor())
 
     def left_press(self, pt):
         """A left click puts the part down; one on the chooser's Cancel button cancels it."""

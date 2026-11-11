@@ -51,10 +51,10 @@ PART_ACTIONS = {"rotate", "flip", "sch_rotate", "sch_mirror_x", "sch_mirror_y"}
 
 # KiCad's actions that put a part in hand, by editor: once pressed, the part
 # follows the mouse until a left click puts it down or Esc drops it.
-# (KiCad action name, default key); see kicad.Holding.
+# (KiCad action name, default key); see kicad.Holding. ("Move with reference"
+# isn't here: its first left click picks the reference point, not a place.)
 HOLD_ACTIONS = {
     "board": [("pcbnew.InteractiveMove.move", "M"), ("pcbnew.InteractiveMove.moveIndividually", "Ctrl+M"),
-              ("pcbnew.InteractiveMove.moveWithReference", ""), ("pcbnew.InteractiveMove.copyWithReference", ""),
               ("pcbnew.InteractiveRouter.Drag45Degree", "D"), ("pcbnew.InteractiveRouter.DragFreeAngle", "G"),
               ("pcbnew.InteractiveEdit.packAndMoveFootprints", "P"), ("common.Interactive.duplicate", "Ctrl+D"),
               ("pcbnew.InteractiveEdit.duplicateIncrementPads", "Ctrl+Shift+D"),
@@ -62,6 +62,10 @@ HOLD_ACTIONS = {
     "schematic": [("eeschema.InteractiveMove.move", "M"), ("eeschema.InteractiveMove.drag", "G"),
                   ("common.Interactive.duplicate", "Ctrl+D"), ("common.Interactive.paste", "Ctrl+V")],
 }
+# While the others hold a part KiCad shows its move cursor, which tells a real
+# hold from a key that found nothing to pick up. These drag with the router,
+# which shows the arrow (and ignores rotate and flip anyway).
+ROUTER_DRAGS = {"pcbnew.InteractiveRouter.Drag45Degree", "pcbnew.InteractiveRouter.DragFreeAngle"}
 
 # --- the settings ----------------------------------------------------------
 
@@ -246,7 +250,9 @@ def kicad_hotkeys(path):
 
 
 def hold_hotkeys(path):
-    """{editor kind: [keys]} for HOLD_ACTIONS as bound in KiCad's user.hotkeys at path (both keys of each)."""
+    """{editor kind: [(key, router drag?)]} for HOLD_ACTIONS as bound in KiCad's user.hotkeys at path
+    (both keys of each action)."""
     bound = _bound_keys(path) or {}
-    return {kind: [k for name, default in actions for k in bound.get(name, [default]) if split_hotkey(k)]
+    return {kind: [(k, name in ROUTER_DRAGS) for name, default in actions for k in bound.get(name, [default])
+                   if split_hotkey(k)]
             for kind, actions in HOLD_ACTIONS.items()}
