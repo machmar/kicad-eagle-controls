@@ -18,47 +18,28 @@ from ctypes import wintypes as w
 import kicad
 import settings
 from logfile import DEBUG, log
-from winapi import (CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN, HWND_TOPMOST, LWA_ALPHA, MK_LBUTTON,
-                    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, POINT, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-                    WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_TIMER, WNDPROC, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, class_name, create_window,
-                    cursor_pos, find_windows, gdi32, has_caption, kernel32, message_loop, mouse_input, send_input,
-                    send_message_timeout, user32, window_rect, window_text)
+from layers import is_copper
+from winapi import (HWND_TOPMOST, LWA_ALPHA, MK_LBUTTON, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, POINT, SW_HIDE,
+                    SWP_NOACTIVATE, SWP_SHOWWINDOW, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_TIMER, WNDPROC,
+                    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+                    create_window, cursor_pos, find_windows, gdi32, has_caption, kernel32, message_loop,
+                    mouse_input, send_input, user32, window_rect, window_text)
 
 # Requests to the chooser's thread (see LayerChooser.request).
 OPEN, STEP, PICK = WM_APP + 0x11, WM_APP + 0x12, WM_APP + 0x13
 APPEAR_S = 1.5                 # wait this long for KiCad's chooser to appear
 HIGHLIGHT_RGB = (0, 120, 215)
-# Fixed names of KiCad's technical layers; the copper layers come before them.
-TECHNICAL_LAYERS = {"F.Adhesive", "B.Adhesive", "F.Paste", "B.Paste", "F.Silkscreen", "B.Silkscreen",
-                    "F.Mask", "B.Mask", "Dwgs.User", "Cmts.User", "Eco1.User", "Eco2.User",
-                    "Edge.Cuts", "Margin", "F.Courtyard", "B.Courtyard", "F.Fab", "B.Fab"}
 
 
 def read_copper_layers():
     """(copper layer names top to bottom, index of the active one or None) from the toolbar, or None."""
-    for frame in kicad.windows():
-        if kicad.editor(frame) != "board":
-            continue
-        for combo in find_windows(lambda h: class_name(h) == "ComboBox", parent=frame):
-            count = send_message_timeout(combo, CB_GETCOUNT, 0, 0)
-            if not count or count <= 0 or count > 200:
-                continue
-            names = []
-            for i in range(count):
-                length = send_message_timeout(combo, CB_GETLBTEXTLEN, i, 0)
-                if length is None or length < 0:
-                    break
-                buf = ctypes.create_unicode_buffer(length + 2)
-                send_message_timeout(combo, CB_GETLBTEXT, i, ctypes.addressof(buf))
-                names.append(buf.value.split(" (")[0])  # "F.Cu (PgUp)" -> "F.Cu"
-            technical = [i for i, n in enumerate(names) if n in TECHNICAL_LAYERS]
-            if not technical or technical[0] < 2:
-                continue  # not the layer selector
-            copper = names[:technical[0]]
-            active = send_message_timeout(combo, CB_GETCURSEL, 0, 0)
-            return copper, active if active is not None and 0 <= active < len(copper) else None
-    return None
+    box = kicad.layer_box(kicad.board_frame(cursor_pos()))
+    if not box:
+        return None
+    copper = [i for i, layer in enumerate(box.layers) if is_copper(layer)]  # they come first
+    if len(copper) < 2:
+        return None
+    return [box.names[i] for i in copper], copper.index(box.active) if box.active in copper else None
 
 
 def find_layer_chooser():

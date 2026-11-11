@@ -25,6 +25,9 @@ Action = collections.namedtuple("Action", "kicad_name default_key label")
 PCB_ACTIONS = {
     "rotate": Action("pcbnew.InteractiveEdit.rotateCcw", "R", "Rotate"),
     "flip": Action("pcbnew.InteractiveEdit.flip", "F", "Flip to other side"),
+    # Switches to the active layer's counterpart (layers.py); on copper it
+    # presses KiCad's "next layer" key, hence that action's name and key.
+    "other_layer": Action("pcbnew.Control.layerNext", "+", "Other side's layer (copper: next layer down)"),
     "next_layer": Action("pcbnew.Control.layerNext", "+", "Next layer down (via while routing)"),
     "layer": Action("pcbnew.Control.layerToggle", "V", "Toggle layer pair (via while routing)"),
     "posture": Action("pcbnew.InteractiveRouter.SwitchPosture", "/", "Switch bend direction"),
@@ -46,6 +49,20 @@ KICAD_ACTIONS = dict(PCB_ACTIONS, **{"sch_" + name: a for name, a in SCHEMATIC_A
 # Actions that change a part, so only make sense while one is in hand.
 PART_ACTIONS = {"rotate", "flip", "sch_rotate", "sch_mirror_x", "sch_mirror_y"}
 
+# KiCad's actions that put a part in hand, by editor: once pressed, the part
+# follows the mouse until a left click puts it down or Esc drops it.
+# (KiCad action name, default key); see kicad.Holding.
+HOLD_ACTIONS = {
+    "board": [("pcbnew.InteractiveMove.move", "M"), ("pcbnew.InteractiveMove.moveIndividually", "Ctrl+M"),
+              ("pcbnew.InteractiveMove.moveWithReference", ""), ("pcbnew.InteractiveMove.copyWithReference", ""),
+              ("pcbnew.InteractiveRouter.Drag45Degree", "D"), ("pcbnew.InteractiveRouter.DragFreeAngle", "G"),
+              ("pcbnew.InteractiveEdit.packAndMoveFootprints", "P"), ("common.Interactive.duplicate", "Ctrl+D"),
+              ("pcbnew.InteractiveEdit.duplicateIncrementPads", "Ctrl+Shift+D"),
+              ("common.Interactive.paste", "Ctrl+V")],
+    "schematic": [("eeschema.InteractiveMove.move", "M"), ("eeschema.InteractiveMove.drag", "G"),
+                  ("common.Interactive.duplicate", "Ctrl+D"), ("common.Interactive.paste", "Ctrl+V")],
+}
+
 # --- the settings ----------------------------------------------------------
 
 DEFAULTS = {
@@ -55,17 +72,18 @@ DEFAULTS = {
     "pan_acceleration": 0.0,        # 0 = constant speed, 1 = strongly speed-dependent
     # Mouse
     "wheel_zoom": True,             # mouse wheel zooms (else it pans, as KiCad's trackpad layout does)
-    # Rotate/flip/mirror only while a part is in hand (left-button drag, M, G,
-    # placing), not when it's merely selected; then the click is KiCad's.
+    # Rotate/flip/mirror only while a part is in hand (it moves with the mouse:
+    # dragged, M, G, pasted, duplicated, placed), not when it's merely
+    # selected; then the click is KiCad's.
     "parts_only_while_moving": True,
     "block_middle_double_click": False,  # hide middle double-clicks from KiCad (no zoom to fit;
                                          # a triple click still reaches KiCad as a double-click)
     # PCB and footprint editors: a PCB_ACTIONS or NO_ACTION key for each click.
-    # "_drag": while moving a part (left-button drag, M, G, placing); "_route": while routing (pencil cursor).
+    # "_drag": while a part is in hand (see above); "_route": while routing (pencil cursor).
     "right_click": "rotate",
     "right_click_drag": "rotate",
     "right_click_route": "posture",
-    "middle_click": "next_layer",
+    "middle_click": "other_layer",
     "middle_click_drag": "flip",
     "middle_click_route": "via_chooser",
     "chooser_places_via": True,     # the left click that picks the via layer also places the via
@@ -80,6 +98,8 @@ DEFAULTS = {
     "dont_ask_layout": False,       # don't remind about KiCad's trackpad scroll layout
 }
 RANGES = {"pan_sensitivity": (0.25, 4.0), "pan_acceleration": (0.0, 1.0)}
+# Saved with the settings; files from before it (1.1 and older) have none.
+FORMAT = 2
 
 
 def _clean(key, value):
@@ -107,12 +127,14 @@ def load(path=PATH):
         data = {}
     if data.get("right_click_rotates_always") is False and "right_click" not in data:
         data["right_click"] = "menu"  # setting from 1.0's checkbox
+    if "format" not in data and data.get("middle_click") == "next_layer":
+        data["middle_click"] = "other_layer"  # the old default, saved along with the other settings
     return {key: _clean(key, data.get(key, default)) for key, default in DEFAULTS.items()}
 
 
 def save(values):
     with open(PATH, "w", encoding="utf-8") as f:
-        json.dump(values, f, indent=2)
+        json.dump(dict(values, format=FORMAT), f, indent=2)
 
 
 class Watched:
@@ -192,24 +214,39 @@ def split_hotkey(text):
     return mods, key
 
 
+def _bound_keys(path):
+    """{KiCad action name: [key, alternate key]} from KiCad's user.hotkeys at path, or None if unreadable."""
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except (OSError, TypeError):
+        return None
+    bound = {}
+    for line in lines:  # "<action name>	<key>	<alternate key>"
+        name, *line_keys = line.split("	")
+        if line_keys:
+            bound[name] = [k.strip() for k in line_keys[:2]]
+    return bound
+
+
 def kicad_hotkeys(path):
     """{action: key} for KICAD_ACTIONS as bound in KiCad's user.hotkeys at path.
 
     Keys are in KiCad's notation ("R", "Shift+R", "PgUp"...); "" means KiCad
     has no usable key for that action.
     """
-    keys = {action: a.default_key for action, a in KICAD_ACTIONS.items()}
-    try:
-        with open(path, encoding="utf-8-sig") as f:
-            lines = f.read().splitlines()
-    except (OSError, TypeError):
-        return keys
-    bound = {}
-    for line in lines:  # "<action name>\t<key>\t<alternate key>"
-        name, *line_keys = line.split("\t")
-        if line_keys:
-            bound[name] = [k.strip() for k in line_keys[:2]]
+    bound = _bound_keys(path) or {}
+    keys = {}
     for action, a in KICAD_ACTIONS.items():
         if a.kicad_name in bound:
             keys[action] = next((k for k in bound[a.kicad_name] if split_hotkey(k)), "")
+        else:
+            keys[action] = a.default_key
     return keys
+
+
+def hold_hotkeys(path):
+    """{editor kind: [keys]} for HOLD_ACTIONS as bound in KiCad's user.hotkeys at path (both keys of each)."""
+    bound = _bound_keys(path) or {}
+    return {kind: [k for name, default in actions for k in bound.get(name, [default]) if split_hotkey(k)]
+            for kind, actions in HOLD_ACTIONS.items()}

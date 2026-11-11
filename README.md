@@ -14,9 +14,9 @@ PCB and footprint editor:
 
 | Input | Does |
 |---|---|
-| Right click while moving a part (left button held, `M`, `G`, or placing a new one) | Rotates it |
-| Middle click while moving a part | Flips it to the other side, like Eagle's mirror |
-| Middle click otherwise | Goes to the next copper layer down, wrapping from B.Cu back to F.Cu |
+| Right click while holding a part (see below) | Rotates it |
+| Middle click while holding a part | Flips it to the other side, like Eagle's mirror |
+| Middle click otherwise | Goes to the other side's layer: F.Silkscreen ↔ B.Silkscreen, F.Paste ↔ B.Paste, and likewise Mask, Adhesive, Courtyard and Fab, plus User.Drawings ↔ User.Comments and User.Eco1 ↔ User.Eco2. On copper it goes to the next copper layer down, wrapping from B.Cu back to F.Cu; on User.1, User.2... to the next user layer. Edge.Cuts and Margin have no counterpart. |
 | Right click while routing | Switches the bend direction |
 | Middle click while routing | Opens KiCad's "Select Layer and Place Through Via" chooser with a highlight on the next layer down. Middle click again moves the highlight; left click places a through via on that layer. Esc cancels. |
 
@@ -24,11 +24,11 @@ Schematic and symbol editor:
 
 | Input | Does |
 |---|---|
-| Right click while moving a part | Rotates it |
-| Middle click while moving a part | Mirrors it left-right, like Eagle's mirror |
+| Right click while holding a part | Rotates it |
+| Middle click while holding a part | Mirrors it left-right, like Eagle's mirror |
 | Right click while drawing a wire | Switches the bend direction |
 
-A part that is only selected isn't touched: then right click opens KiCad's menu as usual. Shift + right click always opens the menu, and middle- and right-button drags still pan. Every one of these can be changed or turned off in the settings.
+A part is **held** while it moves with the mouse: while you drag it with the left button, from `M`, `G`, `D`, `Ctrl+M`, `Ctrl+D` or `Ctrl+V` (whatever keys KiCad has for move, drag, duplicate and paste), and when a new one comes from the footprint or symbol chooser, until a left click puts it down or Esc. A part that is only selected isn't touched: then right click opens KiCad's menu as usual. With a pen, pressing its side button while the tip is on the screen counts as a right click (Windows itself makes nothing of it), so a part dragged with the pen can be rotated too. Shift + right click always opens the menu, and middle- and right-button drags still pan. Every one of these can be changed or turned off in the settings.
 
 ## Install
 
@@ -49,7 +49,7 @@ The plugin starts automatically when the PCB editor opens, and then also covers 
 **PCB Editor → Tools → External Plugins → Eagle-style controls** opens the settings. Each Eagle-style behaviour can be changed or switched back to KiCad's own:
 
 - **Touchpad:** free two-axis panning on/off (off leaves Windows' axis-locked scrolling), **pan sensitivity** (0.25× to 4× your Windows touchpad speed) and **pan acceleration** (off to 100%; slow swipes pan finer, fast swipes further).
-- **Mouse:** wheel zooms on/off (off: it pans), and whether rotate/flip/mirror wait until a part is being moved. Optionally, a middle double-click no longer zooms to fit (off by default; a triple click still does). The **PCB** and **Schematic** tabs set what right and middle click do, separately for normal use, while moving a part and while routing or drawing wires: rotate, flip or mirror, next layer, toggle the layer pair, switch the bend direction, the via layer chooser, or nothing extra (for right click: KiCad's context menu). "Moving" means holding the left button on a part, or moving it with `M` or `G`, or placing a new one (recognised by KiCad's tool cursor, or for a new footprint by its Footprint Chooser closing, until a left click places it or Esc); "routing" means the pencil cursor is showing. The PCB tab also sets whether the left click in the via chooser places the via.
+- **Mouse:** wheel zooms on/off (off: it pans), and whether rotate/flip/mirror wait until a part is being moved. Optionally, a middle double-click no longer zooms to fit (off by default; a triple click still does). The **PCB** and **Schematic** tabs set what right and middle click do, separately for normal use, while moving a part and while routing or drawing wires: rotate, flip or mirror, the other side's layer, next layer, toggle the layer pair, switch the bend direction, the via layer chooser, or nothing extra (for right click: KiCad's context menu). "Holding a part" is as described above; "routing" means the pencil cursor is showing. The PCB tab also sets whether the left click in the via chooser places the via.
 - **Hotkeys** aren't set here: the plugin uses whatever keys KiCad has for rotate, flip, mirror, next layer, layer pair, bend direction and "Select Layer and Place Through Via" (Preferences → Hotkeys, read from KiCad's `user.hotkeys`). The window only warns if a click uses an action that has no key in KiCad.
 - **Reminder** about KiCad's trackpad scroll layout on/off.
 
@@ -61,6 +61,8 @@ The helper uses a Windows low-level mouse hook, and only acts on input aimed at 
 
 - **Wheel:** KiCad is set to the trackpad layout, where scrolling pans and Ctrl+scroll zooms. Windows sends touchpad pinches as Ctrl+scroll, so pinching zooms by itself. A real mouse wheel would now pan, so the helper resends wheel events from a mouse with Ctrl held. It tells the mouse from the touchpad by raw input: a mouse produces raw wheel input in 120-unit notches, and touchpad scrolling doesn't. If you hold Ctrl, Shift or Alt while scrolling, the event passes through unchanged.
 - **Touchpad panning:** Windows locks two-finger scrolling to one axis. The helper reads finger contacts directly from Precision Touchpads (`touchpad.py`, HID raw input). It decides whether the gesture is a pan (fingers move together) or a pinch (fingers spread or close). Over a KiCad canvas, it swallows Windows' scroll events and pans from the real finger motion, at most once per frame. The speed and direction are calibrated against Windows' own scroll events and saved in `%LOCALAPPDATA%\kicad_eagle_controls.json`.
+- **Holding a part:** KiCad's cursor can't tell a held part from a selected one (its move cursor also shows over a selected part, and dragging with `G` or placing a footprint shows the arrow or the pencil). So the helper watches what picks a part up: a left-button drag that shows KiCad's move cursor (a selection box has its own cursors); KiCad's move, drag, duplicate and paste keys, read from `user.hotkeys`, pressed while a canvas has the keyboard focus; or a Footprint Chooser or Choose Symbol window closing without Cancel. A left click or Esc ends it.
+- **Layers:** the active layer and the board's layers come from the layer drop-down in KiCad's toolbar, which stores KiCad's layer number with each entry, so renamed layers don't matter. Picking the counterpart's entry there switches the layer, as if you had chosen it.
 - **Clicks:** a right press is held back until release. If the mouse moves first, it's handed to KiCad so right-drag still pans. Middle clicks pass through and the action follows on release. The keys sent are read from KiCad's `user.hotkeys` and re-read when it changes; click timings are constants at the top of `daemon.py`.
 
 ## Code
@@ -74,7 +76,9 @@ In `eagle_controls/`, the plugin side (runs inside KiCad):
 The helper (`pythonw.exe daemon.py <kicad pid>`):
 
 - `daemon.py`: entry point, the mouse hook and what each click and wheel event does, and raw input.
-- `kicad.py`: what KiCad is doing, seen from outside (the canvas under the mouse, the tool from its cursor), and pressing its hotkeys.
+- `kicad.py`: what KiCad is doing, seen from outside (the canvas under the mouse, the tool from its cursor, whether a part is held, the layer drop-down), and pressing its hotkeys.
+- `layers.py`: middle click's switch to the other side's layer.
+- `pen.py`: a pen's side button pressed with the tip down, read from the pen's HID reports.
 - `pan.py`: touchpad panning and its speed calibration. `touchpad.py` reads the finger contacts for it.
 - `via_chooser.py`: the highlight over KiCad's via layer chooser.
 - `winapi.py`, `logfile.py`: Win32 declarations, and the log (`%TEMP%\kicad_eagle_controls.log`; an empty file named `debug` in the plugin folder makes it detailed).
@@ -85,6 +89,9 @@ The helper (`pythonw.exe daemon.py <kicad pid>`):
 - Diagonal panning needs a Precision Touchpad. Other touchpads still pan, but stay locked to one axis.
 - Wheel-to-zoom also applies to the schematic and other editors in the same KiCad process. The helper only runs once the PCB editor has opened, though. If you run the schematic editor alone, the mouse wheel pans there because of the trackpad scroll settings.
 - Only the OpenGL canvas is handled. The fallback renderer isn't.
+- A move started from KiCad's right-click menu (Move) isn't recognised as holding a part; use `M`.
+- While dragging a footprint with `G` or `D` in the PCB editor (KiCad's router drag), KiCad itself ignores rotate and flip.
+- The layer numbers are KiCad 9's and later.
 
 ## Publishing
 

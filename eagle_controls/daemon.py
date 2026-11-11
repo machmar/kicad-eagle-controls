@@ -8,9 +8,11 @@ It watches the mouse with a low-level hook and only touches input aimed at
 that KiCad process. What clicks do is set in the settings window (dialog.py);
 by default:
 
-  * right click while moving a part         -> rotate; while routing: switch the bend direction
-  * middle click while moving a part        -> flip (PCB) or mirror (schematic)
-  * middle click otherwise                  -> next copper layer; while routing: via layer chooser
+  * right click while holding a part        -> rotate; while routing: switch the bend direction
+    (also a pen's side button pressed with the tip down, which Windows doesn't make a right click of)
+  * middle click while holding a part       -> flip (PCB) or mirror (schematic)
+  * middle click otherwise                  -> the other side's layer (F.Silkscreen <-> B.Silkscreen...),
+                                               next copper layer on copper; while routing: via layer chooser
   * mouse wheel                             -> zoom
   * touchpad two-finger swipe / pinch       -> pan in any direction / zoom
 
@@ -20,10 +22,12 @@ from a mouse are re-sent with Ctrl held to make them zoom.
 
 The pieces, each on its own thread:
   Hook (here)          the mouse hook; Mouse decides what each message does
-  raw_input_thread     raw input: touchpad fingers for pan.py, which wheel is a mouse's, Esc
+  raw_input_thread     raw input: touchpad fingers for pan.py, pen buttons for pen.py, which wheel is a
+                       mouse's, keys for Holding
   Pan.run (pan.py)     sends the touchpad pan to KiCad
   LayerChooser.run     the via layer chooser (via_chooser.py)
-  Placement.run        whether a new footprint is on the cursor (kicad.py)
+  Switcher.run         switches to the other side's layer (layers.py)
+  Holding.run          whether a new part from a chooser is on the cursor (kicad.py)
   refresher            re-reads the settings files, and reinstalls the hook if Windows dropped it
   input_sender, logfile.writer
                        inject input and write the log, which the hook itself must never wait on
@@ -43,22 +47,26 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the 
 import kicad  # noqa: E402
 import logfile  # noqa: E402
 import settings  # noqa: E402
+from layers import Switcher  # noqa: E402
 from logfile import DEBUG, log  # noqa: E402
 from pan import Pan  # noqa: E402
+from pen import Pen  # noqa: E402
 from via_chooser import LayerChooser, OPEN, PICK, STEP  # noqa: E402
 from winapi import (  # noqa: E402
     ABOVE_NORMAL_PRIORITY_CLASS, ERROR_ALREADY_EXISTS, HOOKPROC, HWND_MESSAGE, INFINITE, INJECTED_TAG, LLMHF_INJECTED,
     MOUSEEVENTF_RIGHTDOWN, MSLLHOOKSTRUCT, RAWINPUTDEVICE, RAWINPUTHEADER, RI_MOUSE_WHEEL, RID_INPUT, RIDEV_INPUTSINK,
     RI_KEY_BREAK, RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SYNCHRONIZE, THREAD_PRIORITY_TIME_CRITICAL, VK_CONTROL,
-    VK_ESCAPE, VK_LBUTTON, WH_MOUSE_LL, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    VK_LBUTTON, WH_MOUSE_LL, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDPROC, create_window, input_sender,
-    class_name, kernel32, key_down, key_input, message_loop, modifiers_held, mouse_input, send_input_later, user32,
+    class_name, cursor_pos, kernel32, key_down, key_input, message_loop, modifiers_held, mouse_input,
+    send_input_later, user32,
     wheel_input, window_pid)
 
 # --- timings ---------------------------------------------------------------------
 
 CLICK_SLOP = 10            # a click may move this many (96-dpi) pixels; scaled to the display in main()...
 DRAG_MIN_S = 0.15          # ...and a press only becomes a drag once held this long
+DRAG_SLOP = 3              # KiCad drags a part once the left button moves it this many (96-dpi) pixels
 CLICK_MAX_S = 0.5          # a middle click must be released within this time
 WHEEL_STICKY_S = 0.35      # a scroll gesture keeps its mouse/touchpad verdict this long
 HOOK_SILENT_S = 0.5        # mouse moved but the hook wasn't called for this long: Windows dropped it
@@ -110,6 +118,8 @@ class Mouse:
 
     def __init__(self):
         self.left_down = False   # tracked here: GetAsyncKeyState can miss it from another process
+        self.left_from = None    # where the left button went down
+        self.left_dragged = False  # and the mouse has since moved far enough for KiCad to drag
         self.right = None        # Press held back from KiCad: its action runs on release, or KiCad pans if it moves
         self.middle = None       # Press whose action runs on release, unless it moves (a pan)
         self.last_middle = None  # (time, x, y) of the previous middle press, to spot double-clicks
@@ -144,9 +154,18 @@ class Mouse:
     def dragging(self):
         return self.left_down or key_down(VK_LBUTTON)
 
-    def moving(self, kind):
-        """Whether a part is in hand: dragged with the left button, moved with M or G, or being placed."""
-        return self.dragging() or kicad.tool_busy() or (kind == "board" and kicad.placement.in_hand)
+    def held(self, kind):
+        """Whether a part is in hand on a canvas of that kind: if the mouse moves, the part moves with it.
+
+        That's while dragging one with the left button (KiCad shows its move
+        cursor then; the selection box has its own), and from when a key picks
+        one up (M, G, Ctrl+D, Ctrl+V...) or a chooser hands over a new one,
+        until a left click puts it down or Esc (kicad.Holding). A part that's
+        only selected isn't held, even with the left button down on it.
+        """
+        if self.dragging() and self.left_dragged and kicad.move_cursor():
+            return True
+        return kind is not None and kicad.holding.kind == kind
 
     def click_action(self, button, kind):
         """The action (a settings.KICAD_ACTIONS key) for a "right_click" or "middle_click"
@@ -155,19 +174,17 @@ class Mouse:
             return None
         prefs = settings.prefs.value
         prefix = "sch_" if kind == "schematic" else ""  # the schematic has its own settings
-        if self.dragging():
+        held = self.held(kind)
+        if held:  # before routing: placing a footprint shows the pencil too
             situation = "_drag"
         elif kicad.routing():  # the router's or the wire tool's pencil cursor
             situation = "_route"
-        elif self.moving(kind):
-            situation = "_drag"
         else:
             situation = ""
         action = prefix + prefs[prefix + button + situation]
         if action not in settings.KICAD_ACTIONS:
             return None
-        if (action in settings.PART_ACTIONS and prefs["parts_only_while_moving"]
-                and not self.moving(kind)):
+        if action in settings.PART_ACTIONS and prefs["parts_only_while_moving"] and not held:
             return None  # a part is merely selected: leave the click to KiCad
         return action
 
@@ -175,13 +192,15 @@ class Mouse:
         kind = kicad.canvas_at(pt)
         if DEBUG:
             under = user32.WindowFromPoint(pt)
-            log("%s click on %s (%r, pid %d): left held=%s, %s" % (
-                button, kind, class_name(under), window_pid(under), self.dragging(), kicad.describe_cursor()))
+            log("%s click on %s (%r, pid %d): left button=%s dragged=%s, part held by key/chooser in %s, %s" % (
+                button, kind, class_name(under), window_pid(under), self.dragging(), self.left_dragged,
+                kicad.holding.kind, kicad.describe_cursor()))
         return kind
 
     def left_press(self, msg, info):
         self.left_down = True
-        kicad.placement.left_press(info.pt)
+        self.left_from, self.left_dragged = (info.pt.x, info.pt.y), False
+        kicad.holding.left_press(info.pt)
         return False
 
     def left_release(self, msg, info):
@@ -191,6 +210,10 @@ class Mouse:
         return False
 
     def move(self, msg, info):
+        if self.left_down and not self.left_dragged:
+            slop = DRAG_SLOP * dpi_scale
+            x, y = self.left_from
+            self.left_dragged = abs(info.pt.x - x) > slop or abs(info.pt.y - y) > slop
         if self.middle and is_drag(self.middle, info.pt):
             self.middle = None  # a pan drag: leave it to KiCad
         if self.right and is_drag(self.right, info.pt):
@@ -203,16 +226,29 @@ class Mouse:
         if not action or modifiers_held():
             return False  # e.g. Shift+right click: KiCad's menu
         if self.dragging():
-            perform(action, "right click while dragging")
+            perform(action, "right click while dragging", info.pt)
             return self._hide_press(msg)
         self.right = Press(info.pt.x, info.pt.y, time.perf_counter(), action)  # decided on release or movement
         return True
+
+    def pen_side_button(self):
+        """A pen's side button went down with its tip on the screen (raw input thread).
+
+        The tip is the left button, so this is a right click while the left
+        button is held, except that Windows makes no mouse input of it.
+        """
+        pt = cursor_pos()
+        if not self.dragging():
+            return
+        action = self.click_action("right_click", self._canvas("pen side button", pt))
+        if action:
+            perform(action, "pen side button while dragging", pt)
 
     def right_release(self, msg, info):
         if self._hide_release(msg):
             return True
         if self.right:
-            perform(self.right.action, "right click")
+            perform(self.right.action, "right click", info.pt)
             self.right = None
             return True
         return False
@@ -236,7 +272,7 @@ class Mouse:
 
     def middle_release(self, msg, info):
         if self.middle and time.perf_counter() - self.middle.t < CLICK_MAX_S:
-            perform(self.middle.action, "middle click")
+            perform(self.middle.action, "middle click", info.pt)
         self.middle = None
         return self._hide_release(msg)
 
@@ -260,10 +296,12 @@ class Mouse:
         return False
 
 
-def perform(action, trigger):
-    """Carry out a click action: run the via layer chooser, or press the action's hotkey."""
+def perform(action, trigger, pt):
+    """Carry out a click at pt: run the via layer chooser, switch layers, or press the action's hotkey."""
     if action == "via_chooser":
         chooser.request(OPEN)
+    elif action == "other_layer":
+        switcher.request(pt, trigger)
     else:
         kicad.press(action, trigger)
 
@@ -350,13 +388,16 @@ def on_raw_input(lparam, age_s):
     if not header.hDevice:
         return  # injected input
     if header.dwType == RIM_TYPEHID:
-        pan.feed(header.hDevice, buf.raw[hdr:size.value], age_s)
+        if pen.is_pen(header.hDevice):
+            pen.feed(header.hDevice, buf.raw[hdr:size.value])
+        else:
+            pan.feed(header.hDevice, buf.raw[hdr:size.value], age_s)
     elif header.dwType == RIM_TYPEKEYBOARD:
         # RAWKEYBOARD: MakeCode, Flags, Reserved, VKey
         flags = int.from_bytes(buf.raw[hdr + 2:hdr + 4], "little")
         vkey = int.from_bytes(buf.raw[hdr + 6:hdr + 8], "little")
-        if vkey == VK_ESCAPE and not flags & RI_KEY_BREAK:
-            kicad.placement.escape()
+        if not flags & RI_KEY_BREAK:  # a key going down
+            kicad.holding.key_pressed(vkey)
     elif header.dwType == RIM_TYPEMOUSE:
         # RAWMOUSE: usFlags, 2 bytes padding, usButtonFlags, usButtonData
         flags = int.from_bytes(buf.raw[hdr + 4:hdr + 6], "little")
@@ -368,8 +409,8 @@ def on_raw_input(lparam, age_s):
 
 
 def raw_input_thread():
-    """Thread: a message-only window that gets raw input from mice, touchpads and keyboards
-    (only Esc is looked at), whichever window has focus."""
+    """Thread: a message-only window that gets raw input from mice, touchpads, pens and keyboards
+    (for kicad.Holding), whichever window has focus."""
 
     def wndproc(hwnd, msg, wparam, lparam):
         if msg == WM_INPUT:
@@ -382,8 +423,10 @@ def raw_input_thread():
 
     raw_input_thread.wndproc = WNDPROC(wndproc)  # keep a reference
     hwnd = create_window("KiCadEagleControlsRaw", raw_input_thread.wndproc, parent=HWND_MESSAGE)
-    devices = (RAWINPUTDEVICE * 3)(RAWINPUTDEVICE(0x01, 0x02, RIDEV_INPUTSINK, hwnd),  # mice
+    devices = (RAWINPUTDEVICE * 5)(RAWINPUTDEVICE(0x01, 0x02, RIDEV_INPUTSINK, hwnd),  # mice
                                    RAWINPUTDEVICE(0x0D, 0x05, RIDEV_INPUTSINK, hwnd),  # precision touchpads
+                                   RAWINPUTDEVICE(0x0D, 0x01, RIDEV_INPUTSINK, hwnd),  # pens (digitizers)
+                                   RAWINPUTDEVICE(0x0D, 0x02, RIDEV_INPUTSINK, hwnd),  # pens
                                    RAWINPUTDEVICE(0x01, 0x06, RIDEV_INPUTSINK, hwnd))  # keyboards
     if not user32.RegisterRawInputDevices(devices, len(devices), ctypes.sizeof(RAWINPUTDEVICE)):
         log("RegisterRawInputDevices failed: %d" % ctypes.get_last_error())
@@ -394,7 +437,9 @@ def raw_input_thread():
 
 pan = Pan()
 chooser = LayerChooser()
+switcher = Switcher()
 mouse = Mouse()
+pen = Pen(mouse.pen_side_button, log)
 hook = Hook(mouse.handle)
 
 
@@ -461,7 +506,7 @@ def main():
     settings.prefs.refresh()
     kicad.init(kicad_pid, common_json)
     for run in (logfile.writer, input_sender, pan.run, raw_input_thread, hook.run, refresher, chooser.run,
-                kicad.placement.run):
+                switcher.run, kicad.holding.run):
         threading.Thread(target=run, name=run.__qualname__, daemon=True).start()
     log("started for KiCad pid %d" % kicad_pid)
     if DEBUG:

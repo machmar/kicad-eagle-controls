@@ -3,21 +3,26 @@
 KiCad doesn't tell other processes what it's doing, so this works it out from
 its windows (which canvas is under the mouse), its cursor (whether a tool is
 busy, whether the router is active) and its settings files (hotkeys, scroll
-layout). It also presses KiCad's hotkeys for our actions.
+layout). It also presses KiCad's hotkeys for our actions and picks layers in
+its layer drop-down.
 """
 
+import collections
 import ctypes
 import time
 import zlib
 
 import settings
 from logfile import DEBUG, log
-from winapi import (BITMAP, CURSORINFO, GA_ROOT, GW_OWNER, GWL_STYLE, ICONINFO, VK_CONTROL, VK_MENU, VK_SHIFT, WM_NULL,
-                    class_name, contains, cursor_pos, find_windows, gdi32, has_caption, key_input,
-                    send_input_later, send_message_timeout, user32, window_pid, window_rect, window_text)
+from winapi import (BITMAP, CB_GETCOUNT, CB_GETCURSEL, CB_GETITEMDATA, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_SETCURSEL,
+                    CBN_SELENDOK, CURSORINFO, GA_ROOT, GW_OWNER, GWL_STYLE, ICONINFO, VK_CONTROL, VK_MENU, VK_SHIFT,
+                    VK_ESCAPE, WM_COMMAND, WM_NULL, class_name, contains, cursor_pos, find_windows,
+                    focused_window, gdi32, has_caption, key_down, key_input, send_input_later,
+                    send_message_timeout, user32, window_pid, window_rect, window_text)
 
 PID = 0  # set by init()
 hotkeys = settings.Watched(settings.kicad_hotkeys)                # {action: key}, see settings.KICAD_ACTIONS
+hold_hotkeys = settings.Watched(settings.hold_hotkeys)            # {editor kind: [key]}, see settings.HOLD_ACTIONS
 trackpad_layout = settings.Watched(settings.has_trackpad_layout)  # True, False, or None if unknown
 
 BOARD_FRAMES = ("PCB Editor", "Footprint Editor")          # editors with the PCB click settings
@@ -31,7 +36,7 @@ def init(pid, common_json):
     global PID
     PID = pid
     trackpad_layout.path = common_json
-    hotkeys.path = settings.hotkeys_file(common_json)
+    hotkeys.path = hold_hotkeys.path = settings.hotkeys_file(common_json)
     refresh()
 
 
@@ -39,6 +44,8 @@ def refresh():
     """Re-read KiCad's settings files if they changed. Reads the disk: not from the hook."""
     if hotkeys.refresh():
         log("KiCad hotkeys: %s" % hotkeys.value)
+    if hold_hotkeys.refresh():
+        log("keys that pick a part up: %s" % hold_hotkeys.value)
     if trackpad_layout.refresh():
         log("KiCad scroll layout is %s" % ("trackpad" if trackpad_layout.value else "not trackpad, wheel left alone"))
 
@@ -102,6 +109,67 @@ def canvas_at(pt):
     return _canvas_kind(canvas) if canvas else None
 
 
+def focused_canvas():
+    """The kind of KiCad canvas (see _canvas_kind) that has the keyboard focus, or None.
+
+    KiCad gives the focus to the panel the canvas fills rather than to the
+    canvas itself, so either counts.
+    """
+    focus = focused_window()
+    if not focus or not is_kicad(focus):
+        return None
+    canvas = focus if class_name(focus) == CANVAS_CLASS else find_windows(
+        lambda h: class_name(h) == CANVAS_CLASS and user32.GetParent(h) == focus, parent=focus, first=True)
+    return _canvas_kind(canvas) if canvas else None
+
+
+def board_frame(pt):
+    """The PCB or footprint editor window under pt, else the topmost one, or None."""
+    frames = [f for f in windows() if editor(f) == "board"]
+    return next((f for f in frames if contains(window_rect(f), pt)), frames[0] if frames else None)
+
+
+# --- the layer drop-down -------------------------------------------------------
+# The board editors' toolbar has a drop-down of the board's layers, top to
+# bottom, with the active one selected. Each entry keeps KiCad's layer number
+# (PCB_LAYER_ID) as its item data, which renamed layers don't change.
+
+LayerBox = collections.namedtuple("LayerBox", "hwnd layers names active")
+
+
+def layer_box(frame):
+    """The layer drop-down in that editor window, or None.
+
+    layers: KiCad's layer numbers, in the list's order; names: the layers'
+    names as listed; active: the index of the active layer, or None.
+    """
+    for combo in find_windows(lambda h: class_name(h) == "ComboBox", parent=frame) if frame else ():
+        count = send_message_timeout(combo, CB_GETCOUNT, 0, 0)
+        if not count or not 2 <= count <= 200:
+            continue
+        layers = [send_message_timeout(combo, CB_GETITEMDATA, i, 0) for i in range(count)]
+        # The other drop-downs (grid, zoom, track width...) have no item data, or pointers.
+        if None in layers or len(set(layers)) != count or 0 not in layers or not all(0 <= n < 256 for n in layers):
+            continue
+        names = []
+        for i in range(count):
+            length = send_message_timeout(combo, CB_GETLBTEXTLEN, i, 0)
+            buf = ctypes.create_unicode_buffer(max(length or 0, 0) + 2)
+            send_message_timeout(combo, CB_GETLBTEXT, i, ctypes.addressof(buf))
+            names.append(buf.value.split(" (")[0])  # "F.Cu (PgUp)" -> "F.Cu"
+        active = send_message_timeout(combo, CB_GETCURSEL, 0, 0)
+        return LayerBox(combo, layers, names, active if active is not None and 0 <= active < count else None)
+    return None
+
+
+def select_layer(box, index):
+    """Pick that entry of the layer drop-down, as the user would: KiCad makes it the active layer."""
+    if send_message_timeout(box.hwnd, CB_SETCURSEL, index, 0) != index:
+        return False
+    notify = CBN_SELENDOK << 16 | user32.GetDlgCtrlID(box.hwnd) & 0xFFFF
+    return send_message_timeout(user32.GetParent(box.hwnd), WM_COMMAND, notify, box.hwnd) is not None
+
+
 def wait_until_drawn():
     """Wait until KiCad's window under the cursor is back in its message loop.
 
@@ -121,64 +189,116 @@ def wait_until_drawn():
             break
 
 
-# --- placing a footprint -------------------------------------------------------
+# --- a part in hand ------------------------------------------------------------
+# A part is "in hand" while it moves with the mouse: from when it's picked up
+# until a left click puts it down or Esc drops it. KiCad's cursor can't tell:
+# its move cursor also shows over a part that's only selected, and while
+# dragging with G or placing a new footprint it shows the arrow or the pencil.
+# So we watch what picks a part up instead. A left-button drag is the mouse
+# hook's business (daemon.Mouse.held); the rest is here.
 
-FOOTPRINT_CHOOSER = "Footprint Chooser"  # its title goes on: " (15602 items loaded)"
+# KiCad's part choosers: (the start of the title, which goes on with
+# " (15602 items loaded)"; the editor window that owns it; that editor's kind).
+CHOOSERS = (("Footprint Chooser", "PCB Editor", "board"),
+            ("Choose Symbol", "Schematic Editor", "schematic"))
 
 
-class Placement:
-    """Whether a new footprint is on the cursor, waiting to be placed.
+def _chooser_kind(hwnd):
+    """The editor kind a KiCad part chooser places a part in, or None if hwnd isn't one."""
+    title = window_text(hwnd)
+    for prefix, owner, kind in CHOOSERS:
+        if title.startswith(prefix) and owner in window_text(user32.GetWindow(hwnd, GW_OWNER)):
+            return kind
+    return None
 
-    While placing a footprint KiCad shows the plain arrow, so the cursor can't
-    tell (moving with M or G, and placing a symbol, show KiCad's own cursors).
-    Instead: when KiCad's footprint chooser closes, unless it was cancelled,
-    the footprint is in hand until a left click places it or Esc drops it.
+
+def _pressed(vk, keys):
+    """Whether the key vk going down, with the modifiers held now, is one of keys (KiCad hotkey texts)."""
+    held = {m for m in (VK_SHIFT, VK_CONTROL, VK_MENU) if key_down(m)}
+    for text in keys:
+        if text not in _combos:
+            _combos[text] = _combo(text)
+        combo = _combos[text]
+        if combo and combo[1] == vk and set(combo[0]) == held:
+            return True
+    return False
+
+
+class Holding:
+    """Whether a part is in hand, picked up by one of KiCad's keys (settings.HOLD_ACTIONS:
+    move, drag, duplicate, paste...) or new from a part chooser.
+
+    A chooser closing, unless it was cancelled, puts the new part in hand.
+    The keys only count on a canvas that has the keyboard focus, not while
+    typing in a text field.
     """
 
     def __init__(self):
-        self.in_hand = False
-        self.chooser = None      # the open footprint chooser
+        self.kind = None         # the kind of editor ("board", "schematic") with a part in hand, or None
+        self.chooser = None      # the open part chooser
+        self.chooser_kind = None
         self.cancelled = False   # Esc or Cancel while it was open
 
+    def _pick_up(self, kind, how):
+        self.kind = kind
+        if DEBUG:
+            log("part in hand (%s, %s)" % (how, kind))
+
+    def drop(self, how):
+        if self.kind and DEBUG:
+            log("part put down (%s)" % how)
+        self.kind = None
+
     def run(self):
-        """Thread: notice the chooser opening (within 0.2 s) and closing (within 20 ms)."""
+        """Thread: notice a chooser opening (within 0.2 s) and closing (within 20 ms)."""
         while True:
             if self.chooser:
                 time.sleep(0.02)
                 if not (user32.IsWindow(self.chooser) and user32.IsWindowVisible(self.chooser)):
-                    self.chooser, self.in_hand = None, not self.cancelled
-                    if DEBUG:
-                        log("footprint chooser closed: %s" % ("cancelled" if self.cancelled else "footprint in hand"))
+                    self.chooser = None
+                    if not self.cancelled:
+                        self._pick_up(self.chooser_kind, "new from the chooser")
+                    elif DEBUG:
+                        log("part chooser cancelled")
             else:
                 time.sleep(0.2)
-                self.chooser = find_windows(lambda h: is_kicad(h) and user32.IsWindowVisible(h)
-                                            and window_text(h).startswith(FOOTPRINT_CHOOSER)
-                                            and "PCB Editor" in window_text(user32.GetWindow(h, GW_OWNER)),
-                                            first=True)
-                if self.chooser:  # opened by the PCB editor to place a footprint
-                    self.in_hand = self.cancelled = False
+                for h in windows():
+                    kind = _chooser_kind(h)
+                    if kind:
+                        self.chooser, self.chooser_kind, self.cancelled = h, kind, False
+                        self.drop("chooser opened")
+                        break
+
+    def key_pressed(self, vk):
+        """A key went down (raw input thread)."""
+        if vk == VK_ESCAPE:
+            self.drop("Esc")
+            self.cancelled = bool(self.chooser)
+            return
+        keys = hold_hotkeys.value or {}
+        kind = next((k for k, ks in keys.items() if _pressed(vk, ks)), None)
+        if kind:
+            canvas = focused_canvas()
+            if canvas in keys and _pressed(vk, keys[canvas]):
+                self._pick_up(canvas, "key")
 
     def left_press(self, pt):
-        """A left click places the footprint; one on the chooser's Cancel button cancels it."""
-        self.in_hand = False
+        """A left click puts the part down; one on the chooser's Cancel button cancels it."""
+        self.drop("left click")
         if self.chooser:
             button = user32.WindowFromPoint(pt)
             if class_name(button) == "Button" and window_text(button).replace("&", "") == "Cancel":
                 self.cancelled = True
 
-    def escape(self):
-        self.in_hand = False
-        self.cancelled = bool(self.chooser)
 
-
-placement = Placement()
+holding = Holding()
 
 
 # --- the cursor ----------------------------------------------------------------
-# Windows' own cursors (arrow, I-beam, hand...). KiCad shows the plain arrow
-# while nothing is being moved, even with a part selected, and its own
-# cursors while a tool is busy: moving (M, or a left-button drag), dragging
-# (G), placing a new part, routing.
+# Windows' own cursors (arrow, I-beam, hand...). KiCad 10 shows the plain
+# arrow when idle and while dragging with G, and its own cursors over parts
+# (one for a selected part, which is also the move cursor), for the selection
+# box, while routing or placing a footprint (the pencil), and so on.
 
 SYSTEM_CURSORS = {user32.LoadCursorW(None, ctypes.c_void_p(i))
                   for i in (32512, 32513, 32514, 32515, 32516, 32640, 32641, 32642, 32643, 32644,
@@ -211,18 +331,30 @@ def _shape(cursor):
     return _shapes.get(cursor)
 
 
-def tool_busy():
-    """Whether KiCad shows one of its own tool cursors (moving, dragging, placing...)."""
+def move_cursor():
+    """Whether KiCad shows its move cursor: an arrow like Windows' own, with the hotspot top-left.
+
+    It shows while a part moves with the mouse, but also over a selected part.
+    The selection box's cursors have the hotspot further in, the pencil
+    bottom-left.
+    """
     cursor = _cursor()
-    return bool(cursor) and cursor not in SYSTEM_CURSORS
+    shape = cursor not in SYSTEM_CURSORS and _shape(cursor)
+    if not shape or not shape[2] or not shape[3]:
+        return False
+    x, y, width, height, _ = shape
+    return x < 0.15 * width and y < 0.15 * height
 
 
 def routing():
     """Whether the router (PCB) or the wire tool (schematic) is active.
 
     Both show a pencil cursor, the only one whose hotspot (the pencil tip) is
-    in the bottom-left corner. Arrows have it top-left, the move and placement
-    cursors in the middle.
+    in the bottom-left corner. Arrows have it top-left (KiCad's move cursor
+    too), the selection box's cursors a little further in.
+
+    Placing a footprint shows the pencil too: daemon.Mouse checks for a part
+    in hand first.
     """
     shape = _shape(_cursor())
     if not shape or not shape[2] or not shape[3]:

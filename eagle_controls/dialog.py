@@ -13,10 +13,10 @@ from . import settings
 WARNING_COLOUR = wx.Colour(200, 60, 0)
 # The rows of a click tab: (setting suffix, label, whether it's a right click)
 CLICK_ROWS = [("right_click", "Right click", True),
-              ("right_click_drag", "Right click while moving a part", False),
+              ("right_click_drag", "Right click while holding a part", False),
               ("right_click_route", "Right click while {}", True),
               ("middle_click", "Middle click", False),
-              ("middle_click_drag", "Middle click while moving a part", False),
+              ("middle_click_drag", "Middle click while holding a part", False),
               ("middle_click_route", "Middle click while {}", False)]
 
 
@@ -93,8 +93,8 @@ def show(trackpad_layout, hotkeys_file):
     # --- Mouse: the wheel is shared; the clicks differ per editor, one tab each
     box, pnl = section("Mouse")
     checkbox(pnl, box, "wheel_zoom", "Mouse wheel zooms (otherwise it pans)", wx.ALL, 6)
-    checkbox(pnl, box, "parts_only_while_moving", "Rotate, flip and mirror only while a part is being moved\n"
-             "(left button held, M, G or placing), not when just selected", wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+    checkbox(pnl, box, "parts_only_while_moving", "Rotate, flip and mirror only while a part is held,\n"
+             "not when it's just selected", wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
     checkbox(pnl, box, "block_middle_double_click", "Middle double-click doesn't zoom to fit (triple-click does)",
              wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
     tabs = wx.Notebook(pnl)
@@ -113,10 +113,12 @@ def show(trackpad_layout, hotkeys_file):
         page.SetSizer(page_sizer)
         tabs.AddPage(page, title)
     box.Add(tabs, 0, wx.EXPAND | wx.ALL, 6)
-    box.Add(wx.StaticText(pnl, label="“Moving a part” means holding the left button on it, M, G or\n"
-                                     "placing a new one; “routing” and “drawing wires” mean the\n"
-                                     "pencil cursor is showing. Shift + right click always opens\n"
-                                     "KiCad's menu. Right- and middle-button drags still pan."),
+    box.Add(wx.StaticText(pnl, label="A part is “held” while it moves with the mouse: dragged with the\n"
+                                     "left button, picked up with M, G, D, Ctrl+D or Ctrl+V, or new\n"
+                                     "from the chooser, until a left click puts it down or Esc.\n"
+                                     "“Routing” and “drawing wires” mean the pencil cursor is showing.\n"
+                                     "Shift + right click always opens KiCad's menu. Right- and\n"
+                                     "middle-button drags still pan."),
             0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
     # --- Keys: they come from KiCad's own hotkey settings; only speak up when

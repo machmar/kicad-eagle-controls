@@ -16,13 +16,14 @@ WNDENUMPROC = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
 
 # --- constants ---------------------------------------------------------------
 
-WM_NULL, WM_INPUT, WM_TIMER, WM_APP = 0x0000, 0x00FF, 0x0113, 0x8000
+WM_NULL, WM_INPUT, WM_COMMAND, WM_TIMER, WM_APP = 0x0000, 0x00FF, 0x0111, 0x0113, 0x8000
 WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0200, 0x0201, 0x0202
 WM_RBUTTONDOWN, WM_RBUTTONUP = 0x0204, 0x0205
 WM_MBUTTONDOWN, WM_MBUTTONUP = 0x0207, 0x0208
 WM_MOUSEWHEEL, WM_MOUSEHWHEEL = 0x020A, 0x020E
 MK_LBUTTON = 0x0001
 CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN = 0x0146, 0x0147, 0x0148, 0x0149
+CB_SETCURSEL, CB_GETITEMDATA, CBN_SELENDOK = 0x014E, 0x0150, 9
 
 WH_MOUSE_LL, LLMHF_INJECTED = 14, 0x01
 VK_LBUTTON, VK_SHIFT, VK_CONTROL, VK_MENU, VK_ESCAPE = 0x01, 0x10, 0x11, 0x12, 0x1B
@@ -103,6 +104,12 @@ class ICONINFO(ctypes.Structure):
                 ("hbmMask", w.HBITMAP), ("hbmColor", w.HBITMAP)]
 
 
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [("cbSize", w.DWORD), ("flags", w.DWORD), ("hwndActive", w.HWND), ("hwndFocus", w.HWND),
+                ("hwndCapture", w.HWND), ("hwndMenuOwner", w.HWND), ("hwndMoveSize", w.HWND),
+                ("hwndCaret", w.HWND), ("rcCaret", w.RECT)]
+
+
 class BITMAP(ctypes.Structure):
     _fields_ = [("bmType", ctypes.c_long), ("bmWidth", ctypes.c_long), ("bmHeight", ctypes.c_long),
                 ("bmWidthBytes", ctypes.c_long), ("bmPlanes", w.WORD), ("bmBitsPixel", w.WORD),
@@ -132,6 +139,11 @@ _proto(user32, "GetRawInputDeviceInfoW", w.UINT, [w.HANDLE, w.UINT, w.LPVOID, ct
 _proto(user32, "WindowFromPoint", w.HWND, [POINT])
 _proto(user32, "GetAncestor", w.HWND, [w.HWND, w.UINT])
 _proto(user32, "GetWindow", w.HWND, [w.HWND, w.UINT])
+_proto(user32, "GetParent", w.HWND, [w.HWND])
+_proto(user32, "GetDlgCtrlID", ctypes.c_int, [w.HWND])
+_proto(user32, "GetForegroundWindow", w.HWND)
+_proto(user32, "GetWindowThreadProcessId", w.DWORD, [w.HWND, ctypes.POINTER(w.DWORD)])
+_proto(user32, "GetGUIThreadInfo", w.BOOL, [w.DWORD, ctypes.POINTER(GUITHREADINFO)])
 _proto(user32, "GetWindowLongW", ctypes.c_long, [w.HWND, ctypes.c_int])
 _proto(user32, "GetWindowRect", w.BOOL, [w.HWND, ctypes.POINTER(w.RECT)])
 _proto(user32, "IsWindow", w.BOOL, [w.HWND])
@@ -185,6 +197,13 @@ def window_pid(hwnd):
     pid = w.DWORD()
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     return pid.value
+
+
+def focused_window():
+    """The window with the keyboard focus, in whichever process has the foreground, or None."""
+    thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+    info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+    return info.hwndFocus if thread and user32.GetGUIThreadInfo(thread, ctypes.byref(info)) else None
 
 
 def has_caption(hwnd):
