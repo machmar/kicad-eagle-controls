@@ -84,11 +84,17 @@ def _canvas_in(frame, pt):
 
 def canvas_at(pt):
     """The kind of KiCad canvas under pt (see _canvas_kind), or None if it isn't one."""
+    canvas = canvas_window_at(pt)
+    return _canvas_kind(canvas) if canvas else None
+
+
+def canvas_window_at(pt):
+    """The KiCad canvas window under pt, or None if it isn't one."""
     hwnd = user32.WindowFromPoint(pt)
     if not hwnd or not is_kicad(hwnd):
         return None
     if class_name(hwnd) == CANVAS_CLASS:
-        return _canvas_kind(hwnd)
+        return hwnd
     # KiCad puts things over the canvas: overlays inside the editor window
     # (e.g. while routing) and little popups such as the hotkey feedback
     # ("Layer: B.Cu") next to the cursor. Look through them to the canvas.
@@ -106,7 +112,7 @@ def canvas_at(pt):
         log("%r in %r (%r, style %08x) over the canvas area: %s" % (
             class_name(hwnd), class_name(root), window_text(root),
             user32.GetWindowLongW(root, GWL_STYLE) & 0xFFFFFFFF, "yes" if canvas else "no"))
-    return _canvas_kind(canvas) if canvas else None
+    return canvas or None
 
 
 def focused_canvas():

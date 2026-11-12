@@ -16,6 +16,12 @@ by default:
   * mouse wheel                             -> zoom
   * touchpad two-finger swipe / pinch       -> pan in any direction / zoom
 
+While panning or zooming by dragging with the middle or right button, KiCad
+wraps the cursor round to the canvas' other side when it reaches an edge.
+That only works for a mouse: a pen or touchscreen puts the cursor back where
+it points, and the view jumps. For those the cursor is kept on the canvas
+instead, so it stops at the edge.
+
 The wheel part relies on KiCad's "trackpad" scroll layout (plain scroll pans,
 Ctrl+scroll zooms). With it a real mouse wheel would pan too, so wheel events
 from a mouse are re-sent with Ctrl held to make them zoom.
@@ -54,12 +60,12 @@ from pen import Pen  # noqa: E402
 from via_chooser import LayerChooser, OPEN, PICK, STEP  # noqa: E402
 from winapi import (  # noqa: E402
     ABOVE_NORMAL_PRIORITY_CLASS, ERROR_ALREADY_EXISTS, HOOKPROC, HWND_MESSAGE, INFINITE, INJECTED_TAG, LLMHF_INJECTED,
-    MOUSEEVENTF_RIGHTDOWN, MSLLHOOKSTRUCT, RAWINPUTDEVICE, RAWINPUTHEADER, RI_MOUSE_WHEEL, RID_INPUT, RIDEV_INPUTSINK,
+    MI_WP_SIGNATURE, MI_WP_SIGNATURE_MASK, MOUSE_MOVE_ABSOLUTE, MOUSEEVENTF_RIGHTDOWN, MSLLHOOKSTRUCT, RAWINPUTDEVICE, RAWINPUTHEADER, RI_MOUSE_WHEEL, RID_INPUT, RIDEV_INPUTSINK,
     RI_KEY_BREAK, RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SYNCHRONIZE, THREAD_PRIORITY_TIME_CRITICAL, VK_CONTROL,
     VK_LBUTTON, WH_MOUSE_LL, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDPROC, create_window, input_sender,
     class_name, cursor_pos, kernel32, key_down, key_input, message_loop, modifiers_held, mouse_input,
-    send_input_later, user32,
+    move_input, send_input_later, user32, window_rect,
     wheel_input, window_pid)
 
 # --- timings ---------------------------------------------------------------------
@@ -68,6 +74,7 @@ CLICK_SLOP = 10            # a click may move this many (96-dpi) pixels; scaled 
 DRAG_MIN_S = 0.15          # ...and a press only becomes a drag once held this long
 DRAG_SLOP = 3              # KiCad drags a part once the left button moves it this many (96-dpi) pixels
 CLICK_MAX_S = 0.5          # a middle click must be released within this time
+EDGE_INSET = 2             # an absolute pointer is held this many pixels inside the canvas while panning
 PEN_TWIN_S = 0.3           # a right click and a pen side button this close together are the same press
 WHEEL_STICKY_S = 0.35      # a scroll gesture keeps its mouse/touchpad verdict this long
 HOOK_SILENT_S = 0.5        # mouse moved but the hook wasn't called for this long: Windows dropped it
@@ -128,6 +135,11 @@ class Mouse:
         # drivers make a right click of the side button themselves: then both arrive, once.
         self.right_drag_t = self.pen_drag_t = -1.0
         self.hidden = set()      # button-up messages to hide because their button-down was hidden
+        # A middle or right drag that KiCad may pan or zoom by: the canvas it started on
+        # (left, top, right, bottom, edges included), its button-up message, and
+        # where we last held the cursor at the edge.
+        self.pan_area = self.pan_end = self.edge_point = None
+        self.absolute = False    # the mouse device moving the cursor reports positions, e.g. a tablet (raw input)
         self.wheel = WheelSource()
         self.handlers = {WM_LBUTTONDOWN: self.left_press, WM_LBUTTONUP: self.left_release,
                          WM_RBUTTONDOWN: self.right_press, WM_RBUTTONUP: self.right_release,
@@ -137,13 +149,42 @@ class Mouse:
     def handle(self, msg, info):
         if msg in (WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN):
             self.hidden.discard(msg + 1)  # a new press: whatever became of the last release, it's over
+        if msg == self.pan_end:
+            self.pan_area = self.pan_end = None
         # While our highlight is over KiCad's via layer chooser, a left click
         # picks the highlighted layer and a middle click moves the highlight.
         if chooser.shown and msg in (WM_LBUTTONDOWN, WM_MBUTTONDOWN):
             chooser.request(PICK if msg == WM_LBUTTONDOWN else STEP)
             return self._hide_press(msg)
         handler = self.handlers.get(msg)
-        return handler(msg, info) if handler else False
+        hide = handler(msg, info) if handler else False
+        if msg in (WM_MBUTTONDOWN, WM_RBUTTONDOWN) and msg + 1 not in self.hidden:
+            self._pan_may_start(msg, info.pt)  # KiCad gets the press, now or once it moves
+        return hide
+
+    def _pan_may_start(self, msg, pt):
+        canvas = kicad.canvas_window_at(pt)
+        r = canvas and window_rect(canvas)
+        if r:
+            self.pan_area = (r.left + EDGE_INSET, r.top + EDGE_INSET, r.right - 1 - EDGE_INSET, r.bottom - 1 - EDGE_INSET)
+            self.pan_end, self.edge_point = msg + 1, None
+
+    def _absolute_pointer(self, info):
+        """Whether this mouse move comes from something that points (pen, touch, tablet) rather than a mouse."""
+        return (info.dwExtraInfo & MI_WP_SIGNATURE_MASK) == MI_WP_SIGNATURE or self.absolute
+
+    def _keep_on_canvas(self, pt):
+        """A move during a pan: hold the cursor at the canvas' edge rather than let it off,
+        where KiCad would wrap it round. Returns True to hide the move from KiCad."""
+        left, top, right, bottom = self.pan_area
+        edge = (min(max(pt.x, left), right), min(max(pt.y, top), bottom))
+        if edge == (pt.x, pt.y):
+            self.edge_point = None
+            return False
+        if edge != self.edge_point:
+            self.edge_point = edge
+            send_input_later([move_input(*edge)])
+        return True
 
     def _hide_press(self, msg):
         self.hidden.add(msg + 1)  # the matching button-up
@@ -224,6 +265,8 @@ class Mouse:
         if self.right and is_drag(self.right, info.pt):
             self.right = None   # a right drag: give KiCad the press after all, so it pans
             send_input_later([mouse_input(MOUSEEVENTF_RIGHTDOWN)])
+        if self.pan_area and self._absolute_pointer(info):
+            return self._keep_on_canvas(info.pt)
         return False
 
     def right_press(self, msg, info):
@@ -397,6 +440,15 @@ def on_raw_input(lparam, age_s):
     if user32.GetRawInputData(lparam, RID_INPUT, buf, ctypes.byref(size), hdr) != size.value:
         return
     header = RAWINPUTHEADER.from_buffer(buf)
+    if header.dwType == RIM_TYPEMOUSE:
+        # RAWMOUSE: usFlags, 2 bytes padding, usButtonFlags, usButtonData, ulRawButtons, lLastX, lLastY,
+        # ulExtraInformation. Before the check for injected input: some tablet drivers inject their moves.
+        raw = buf.raw[hdr:size.value]
+        if len(raw) >= 24 and int.from_bytes(raw[20:24], "little") != INJECTED_TAG:
+            if int.from_bytes(raw[0:2], "little") & MOUSE_MOVE_ABSOLUTE:
+                mouse.absolute = True
+            elif raw[12:20] != bytes(8):  # it moved
+                mouse.absolute = False
     if not header.hDevice:
         return  # injected input
     if header.dwType == RIM_TYPEHID:
