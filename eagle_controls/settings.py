@@ -10,7 +10,7 @@ import json
 import os
 
 TITLE = "Eagle-style controls"
-VERSION = "1.3.1"  # must match metadata.json; build_pcm.py checks
+VERSION = "1.2.1"  # must match metadata.json; build_pcm.py checks
 PATH = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.dirname(os.path.abspath(__file__)),
                     "kicad_eagle_controls_prefs.json")
 MUTEX_NAME = "Local\\KiCadEagleControls_%d"  # held by the helper while it serves that KiCad pid
