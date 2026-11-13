@@ -1,4 +1,4 @@
-"""The pen's side button while its tip is on the screen.
+"""The pen's side button while its tip is on the screen, and which end of the pen is in use.
 
 Windows turns a pen into mouse input: the tip is the left button, and the
 side (barrel) button held while tapping is a right click. With the tip
@@ -15,17 +15,23 @@ from touchpad import HIDP_CAPS, HIDP_STATUS_SUCCESS, HidP_Input, PAGE_DIGITIZER,
 from winapi import RIDI_PREPARSEDDATA, user32
 
 USAGE_DIGITIZER, USAGE_PEN, USAGE_BARREL = 0x01, 0x02, 0x44
+# The eraser end: Invert while it's near the screen, Eraser while it touches.
+USAGE_INVERT, USAGE_ERASER = 0x3C, 0x45
 PEN_USAGES = (USAGE_DIGITIZER, USAGE_PEN)  # top-level collections pens report in
 
 
 class Pen:
-    """Watches pens; on_side_button() is called when a side button goes down with the tip on the screen."""
+    """Watches pens; on_side_button() is called when a side button goes down with the tip on the screen.
+
+    .eraser says whether the last pen report had the eraser end near or on the screen.
+    """
 
     def __init__(self, on_side_button, log):
         self.on_side_button = on_side_button
         self.log = log
         self.devices = {}  # hDevice -> preparsed data if it's a pen, else None
         self.barrel = {}   # hDevice -> whether its side button was down in the last report
+        self.eraser = False
 
     def is_pen(self, hdevice):
         """Whether this HID device (raw input handle) is a pen. Looked up once per device."""
@@ -62,3 +68,4 @@ class Pen:
             if barrel and not self.barrel.get(hdevice) and USAGE_TIP in down:
                 self.on_side_button()
             self.barrel[hdevice] = barrel
+            self.eraser = USAGE_INVERT in down or USAGE_ERASER in down

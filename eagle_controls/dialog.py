@@ -121,6 +121,10 @@ def show(trackpad_layout, hotkeys_file):
                                      "middle-button drags still pan."),
             0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
+    # --- Pen
+    box, pnl = section("Pen")
+    checkbox(pnl, box, "pen_eraser_deletes", "Tapping with the eraser end deletes what it touches", wx.ALL, 6)
+
     # --- Keys: they come from KiCad's own hotkey settings; only speak up when
     # one that a click is set to use isn't bound there.
     keys = settings.kicad_hotkeys(hotkeys_file)
@@ -131,6 +135,8 @@ def show(trackpad_layout, hotkeys_file):
         if action in keys and not keys[action]:
             label = settings.KICAD_ACTIONS[action].label
             unbound.add("schematic " + label.lower() if sch else label)
+    if values["pen_eraser_deletes"] and not keys["delete"]:
+        unbound.add("Delete")
     if unbound:
         warning("No hotkey in KiCad for: %s.\nAssign one in KiCad's Preferences → Hotkeys."
                 % ", ".join(sorted(unbound)))

@@ -15,6 +15,7 @@ by default:
                                                next copper layer on copper; while routing: via layer chooser
   * mouse wheel                             -> zoom
   * touchpad two-finger swipe / pinch       -> pan in any direction / zoom
+  * tap with the pen's eraser end           -> delete what's there (off by default; a drag does nothing)
 
 While panning or zooming by dragging with the middle or right button, KiCad
 wraps the cursor round to the canvas' other side when it reaches an edge.
@@ -28,12 +29,13 @@ from a mouse are re-sent with Ctrl held to make them zoom.
 
 The pieces, each on its own thread:
   Hook (here)          the mouse hook; Mouse decides what each message does
-  raw_input_thread     raw input: touchpad fingers for pan.py, pen buttons for pen.py, which wheel is a
+  raw_input_thread     raw input: touchpad fingers for pan.py, pen buttons and ends for pen.py, which wheel is a
                        mouse's, keys for Holding
   Pan.run (pan.py)     sends the touchpad pan to KiCad
   LayerChooser.run     the via layer chooser (via_chooser.py)
   Switcher.run         switches to the other side's layer (layers.py)
   Holding.run          whether a new part from a chooser is on the cursor (kicad.py)
+  EraserTap.run        KiCad's selection menu after a tap with the pen's eraser end (eraser.py)
   refresher            re-reads the settings files, and reinstalls the hook if Windows dropped it
   input_sender, logfile.writer
                        inject input and write the log, which the hook itself must never wait on
@@ -53,6 +55,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the 
 import kicad  # noqa: E402
 import logfile  # noqa: E402
 import settings  # noqa: E402
+from eraser import EraserTap  # noqa: E402
 from layers import Switcher  # noqa: E402
 from logfile import DEBUG, log  # noqa: E402
 from pan import Pan  # noqa: E402
@@ -60,7 +63,7 @@ from pen import Pen  # noqa: E402
 from via_chooser import LayerChooser, OPEN, PICK, STEP  # noqa: E402
 from winapi import (  # noqa: E402
     ABOVE_NORMAL_PRIORITY_CLASS, ERROR_ALREADY_EXISTS, HOOKPROC, HWND_MESSAGE, INFINITE, INJECTED_TAG, LLMHF_INJECTED,
-    MI_WP_SIGNATURE, MI_WP_SIGNATURE_MASK, MOUSE_MOVE_ABSOLUTE, MOUSEEVENTF_RIGHTDOWN, MSLLHOOKSTRUCT, RAWINPUTDEVICE, RAWINPUTHEADER, RI_MOUSE_WHEEL, RID_INPUT, RIDEV_INPUTSINK,
+    MI_WP_SIGNATURE, MI_WP_SIGNATURE_MASK, MI_WP_TOUCH, MOUSE_MOVE_ABSOLUTE, MOUSEEVENTF_RIGHTDOWN, MSLLHOOKSTRUCT, RAWINPUTDEVICE, RAWINPUTHEADER, RI_MOUSE_WHEEL, RID_INPUT, RIDEV_INPUTSINK,
     RI_KEY_BREAK, RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SYNCHRONIZE, THREAD_PRIORITY_TIME_CRITICAL, VK_CONTROL,
     VK_LBUTTON, WH_MOUSE_LL, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDPROC, create_window, input_sender,
@@ -128,6 +131,7 @@ class Mouse:
         self.left_down = False   # tracked here: GetAsyncKeyState can miss it from another process
         self.left_from = None    # where the left button went down
         self.left_dragged = False  # and the mouse has since moved far enough for KiCad to drag
+        self.erase_from = None   # (x, y) where the pen's eraser end touched, hidden from KiCad
         self.right = None        # Press held back from KiCad: its action runs on release, or KiCad pans if it moves
         self.middle = None       # Press whose action runs on release, unless it moves (a pan)
         self.last_middle = None  # (time, x, y) of the previous middle press, to spot double-clicks
@@ -149,6 +153,8 @@ class Mouse:
     def handle(self, msg, info):
         if msg in (WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN):
             self.hidden.discard(msg + 1)  # a new press: whatever became of the last release, it's over
+        if msg != WM_MOUSEMOVE:
+            eraser_tap.button(msg, info.pt)
         if msg == self.pan_end:
             self.pan_area = self.pan_end = None
         # While our highlight is over KiCad's via layer chooser, a left click
@@ -243,13 +249,35 @@ class Mouse:
                 kicad.holding.kind, kicad.describe_cursor()))
         return kind
 
+    def _eraser_press(self, info):
+        """Whether a left press is the pen's eraser end touching a canvas, to delete with."""
+        if not settings.prefs.value["pen_eraser_deletes"] or not pen.eraser:
+            return False
+        extra = info.dwExtraInfo
+        if (extra & MI_WP_SIGNATURE_MASK) != MI_WP_SIGNATURE or extra & MI_WP_TOUCH:
+            return False  # a mouse or a finger: pen.eraser is only about the pen
+        kind = kicad.canvas_at(info.pt)
+        return (kind in ("board", "schematic") and not modifiers_held() and not self.held(kind)
+                and not kicad.routing())
+
     def left_press(self, msg, info):
+        """A press of the pen's eraser end is hidden from KiCad, so dragging it does nothing;
+        a tap is acted on at release."""
+        self.erase_from = None
+        if self._eraser_press(info):
+            self.erase_from = (info.pt.x, info.pt.y)
+            return self._hide_press(msg)
         self.left_down = True
         self.left_from, self.left_dragged = (info.pt.x, info.pt.y), False
         kicad.holding.left_press(info.pt)
         return False
 
     def left_release(self, msg, info):
+        if self.erase_from:
+            (x, y), self.erase_from = self.erase_from, None
+            slop = CLICK_SLOP * dpi_scale
+            if abs(info.pt.x - x) <= slop and abs(info.pt.y - y) <= slop:  # a tap, not a drag
+                eraser_tap.tap()
         if self._hide_release(msg):
             return True
         self.left_down = False
@@ -462,6 +490,7 @@ def on_raw_input(lparam, age_s):
         vkey = int.from_bytes(buf.raw[hdr + 6:hdr + 8], "little")
         if not flags & RI_KEY_BREAK:  # a key going down
             kicad.holding.key_pressed(vkey)
+            eraser_tap.key_pressed(vkey)
     elif header.dwType == RIM_TYPEMOUSE:
         # RAWMOUSE: usFlags, 2 bytes padding, usButtonFlags, usButtonData
         flags = int.from_bytes(buf.raw[hdr + 4:hdr + 6], "little")
@@ -502,7 +531,9 @@ def raw_input_thread():
 pan = Pan()
 chooser = LayerChooser()
 switcher = Switcher()
+chooser.fallback = switcher.request
 mouse = Mouse()
+eraser_tap = EraserTap()
 pen = Pen(mouse.pen_side_button, log)
 hook = Hook(mouse.handle)
 
@@ -570,7 +601,7 @@ def main():
     settings.prefs.refresh()
     kicad.init(kicad_pid, common_json)
     for run in (logfile.writer, input_sender, pan.run, raw_input_thread, hook.run, refresher, chooser.run,
-                switcher.run, kicad.holding.run):
+                switcher.run, kicad.holding.run, eraser_tap.run):
         threading.Thread(target=run, name=run.__qualname__, daemon=True).start()
     log("started for KiCad pid %d" % kicad_pid)
     if DEBUG:

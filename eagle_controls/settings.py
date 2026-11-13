@@ -10,7 +10,7 @@ import json
 import os
 
 TITLE = "Eagle-style controls"
-VERSION = "1.2.1"  # must match metadata.json; build_pcm.py checks
+VERSION = "1.3.1"  # must match metadata.json; build_pcm.py checks
 PATH = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.dirname(os.path.abspath(__file__)),
                     "kicad_eagle_controls_prefs.json")
 MUTEX_NAME = "Local\\KiCadEagleControls_%d"  # held by the helper while it serves that KiCad pid
@@ -44,8 +44,11 @@ SCHEMATIC_ACTIONS = {  # stored without a prefix, known to the helper as "sch_<n
 # Click settings that leave the click to KiCad. "menu" is offered for right clicks.
 NO_ACTION = {"off": "Nothing", "menu": "KiCad's context menu"}
 
+# Not for clicks: the pen's eraser end presses it (pen_eraser_deletes). The same action in every editor.
+DELETE = Action("common.Interactive.doDelete", "Del", "Delete")
+
 # Every action the helper can press, by its helper name.
-KICAD_ACTIONS = dict(PCB_ACTIONS, **{"sch_" + name: a for name, a in SCHEMATIC_ACTIONS.items()})
+KICAD_ACTIONS = dict(PCB_ACTIONS, **{"sch_" + name: a for name, a in SCHEMATIC_ACTIONS.items()}, delete=DELETE)
 # Actions that change a part, so only make sense while one is in hand.
 PART_ACTIONS = {"rotate", "flip", "sch_rotate", "sch_mirror_x", "sch_mirror_y"}
 
@@ -98,6 +101,8 @@ DEFAULTS = {
     "sch_middle_click": "mirror_x",      # Eagle's mirror, also while moving with M
     "sch_middle_click_drag": "mirror_x",
     "sch_middle_click_route": "off",
+    # Pen, in every editor: a tap with its eraser end clicks there and presses Delete
+    "pen_eraser_deletes": False,
     # Misc
     "dont_ask_layout": False,       # don't remind about KiCad's trackpad scroll layout
 }

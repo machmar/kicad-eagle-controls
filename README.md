@@ -50,6 +50,7 @@ The plugin starts automatically when the PCB editor opens, and then also covers 
 
 - **Touchpad:** free two-axis panning on/off (off leaves Windows' axis-locked scrolling), **pan sensitivity** (0.25× to 4× your Windows touchpad speed) and **pan acceleration** (off to 100%; slow swipes pan finer, fast swipes further).
 - **Mouse:** wheel zooms on/off (off: it pans), and whether rotate/flip/mirror wait until a part is being moved. Optionally, a middle double-click no longer zooms to fit (off by default; a triple click still does). The **PCB** and **Schematic** tabs set what right and middle click do, separately for normal use, while moving a part and while routing or drawing wires: rotate, flip or mirror, the other side's layer, next layer, toggle the layer pair, switch the bend direction, the via layer chooser, or nothing extra (for right click: KiCad's context menu). "Holding a part" is as described above; "routing" means the pencil cursor is showing. The PCB tab also sets whether the left click in the via chooser places the via.
+- **Pen:** tapping with the pen's eraser end deletes what it touches (off by default, the same in every editor). The tap reaches KiCad as a click, which selects what's there, and then the helper presses KiCad's Delete key; a tap on empty space deletes nothing. Where things overlap, KiCad's Clarify Selection menu opens: pick what you meant and it's deleted; cancel and nothing is. Dragging the eraser does nothing. It doesn't act while a part is held, while routing, or with Shift, Ctrl or Alt held, and it needs a pen that reports its eraser end to Windows.
 - **Hotkeys** aren't set here: the plugin uses whatever keys KiCad has for rotate, flip, mirror, next layer, layer pair, bend direction and "Select Layer and Place Through Via" (Preferences → Hotkeys, read from KiCad's `user.hotkeys`). The window only warns if a click uses an action that has no key in KiCad.
 - **Reminder** about KiCad's trackpad scroll layout on/off.
 
@@ -79,7 +80,8 @@ The helper (`pythonw.exe daemon.py <kicad pid>`):
 - `daemon.py`: entry point, the mouse hook and what each click and wheel event does, and raw input.
 - `kicad.py`: what KiCad is doing, seen from outside (the canvas under the mouse, the tool from its cursor, whether a part is held, the layer drop-down), and pressing its hotkeys.
 - `layers.py`: middle click's switch to the other side's layer.
-- `pen.py`: a pen's side button pressed with the tip down, read from the pen's HID reports.
+- `eraser.py`: a tap with the pen's eraser end: the click, Delete, and KiCad's Clarify Selection menu.
+- `pen.py`: a pen's side button pressed with the tip down, and whether its eraser end is in use, read from the pen's HID reports.
 - `pan.py`: touchpad panning and its speed calibration. `touchpad.py` reads the finger contacts for it.
 - `via_chooser.py`: the highlight over KiCad's via layer chooser.
 - `winapi.py`, `logfile.py`: Win32 declarations, and the log (`%TEMP%\kicad_eagle_controls.log`; an empty file named `debug` in the plugin folder makes it detailed).

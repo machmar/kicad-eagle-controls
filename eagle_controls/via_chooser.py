@@ -27,7 +27,7 @@ from winapi import (HWND_TOPMOST, LWA_ALPHA, MK_LBUTTON, MOUSEEVENTF_LEFTDOWN, M
 
 # Requests to the chooser's thread (see LayerChooser.request).
 OPEN, STEP, PICK = WM_APP + 0x11, WM_APP + 0x12, WM_APP + 0x13
-APPEAR_S = 1.5                 # wait this long for KiCad's chooser to appear
+APPEAR_S = 0.6                 # wait this long for KiCad's chooser to appear
 HIGHLIGHT_RGB = (0, 120, 215)
 
 
@@ -68,6 +68,7 @@ class LayerChooser:
         self.names = []         # copper layers, top to bottom: the chooser's rows
         self.active = None      # index of the active layer, which the chooser skips
         self.index = 0          # the highlighted row
+        self.fallback = None    # fallback(pt, trigger) switches layers when KiCad's chooser doesn't appear
 
     def request(self, msg):
         """Ask the chooser's thread to OPEN KiCad's chooser, STEP the highlight, or PICK its row."""
@@ -120,7 +121,10 @@ class LayerChooser:
             time.sleep(0.03)
             found = find_layer_chooser()
         if not found:
-            log("layer chooser didn't appear")
+            # The pencil also shows while the route tool is merely selected; then switch layers instead.
+            log("layer chooser didn't appear; switching layers instead")
+            if self.fallback:
+                self.fallback(cursor_pos(), "middle click with the route tool idle")
             return
         self.dialog, self.grid = found
         self.index = self.active if self.active is not None else -1
