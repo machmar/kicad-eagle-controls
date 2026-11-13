@@ -363,6 +363,17 @@ def move_cursor():
     return x < 0.15 * width and y < 0.15 * height
 
 
+def selection_tool():
+    """Whether KiCad's selection tool is active, rather than one of its other tools.
+
+    It shows the plain arrow, or its move cursor over a part; KiCad's other
+    tools show their own cursors (the pencil, crosshairs...), none with the
+    hotspot top-left.
+    """
+    cursor = _cursor()
+    return cursor in SYSTEM_CURSORS or move_cursor()
+
+
 def routing():
     """Whether the router (PCB) or the wire tool (schematic) is active.
 

@@ -124,6 +124,14 @@ def is_drag(press, pt):
     return moved and time.perf_counter() - press.t >= DRAG_MIN_S
 
 
+def second_click(last, now, pt):
+    """Whether a press at pt is the second of a double-click after the last one, (time, x, y) or None."""
+    # Windows' double-click metrics are in 96-dpi pixels, the hook's in physical ones.
+    return (last is not None and now - last[0] <= user32.GetDoubleClickTime() / 1000
+            and abs(pt.x - last[1]) <= user32.GetSystemMetrics(SM_CXDOUBLECLK) * dpi_scale
+            and abs(pt.y - last[2]) <= user32.GetSystemMetrics(SM_CYDOUBLECLK) * dpi_scale)
+
+
 class Mouse:
     """Decides what the hook does with each mouse message. handle() returns True to hide it from KiCad."""
 
@@ -135,6 +143,7 @@ class Mouse:
         self.right = None        # Press held back from KiCad: its action runs on release, or KiCad pans if it moves
         self.middle = None       # Press whose action runs on release, unless it moves (a pan)
         self.last_middle = None  # (time, x, y) of the previous middle press, to spot double-clicks
+        self.last_left = None    # the same for the left button
         # When the right button / the pen's side button last acted while dragging. Some pen
         # drivers make a right click of the side button themselves: then both arrive, once.
         self.right_drag_t = self.pen_drag_t = -1.0
@@ -257,8 +266,7 @@ class Mouse:
         if (extra & MI_WP_SIGNATURE_MASK) != MI_WP_SIGNATURE or extra & MI_WP_TOUCH:
             return False  # a mouse or a finger: pen.eraser is only about the pen
         kind = kicad.canvas_at(info.pt)
-        return (kind in ("board", "schematic") and not modifiers_held() and not self.held(kind)
-                and not kicad.routing())
+        return kind in ("board", "schematic") and not modifiers_held() and not self.held(kind)
 
     def left_press(self, msg, info):
         """A press of the pen's eraser end is hidden from KiCad, so dragging it does nothing;
@@ -267,6 +275,13 @@ class Mouse:
         if self._eraser_press(info):
             self.erase_from = (info.pt.x, info.pt.y)
             return self._hide_press(msg)
+        if settings.prefs.value["pen_eraser_deletes"]:  # whether this starts or ends a track or a wire
+            now = time.perf_counter()
+            second = second_click(self.last_left, now, info.pt)
+            self.last_left = None if second else (now, info.pt.x, info.pt.y)
+            kind = kicad.canvas_at(info.pt)
+            on_canvas = kind in ("board", "schematic")
+            eraser_tap.left_press(on_canvas, on_canvas and kicad.routing() and not self.held(kind), second)
         self.left_down = True
         self.left_from, self.left_dragged = (info.pt.x, info.pt.y), False
         kicad.holding.left_press(info.pt)
@@ -343,11 +358,7 @@ class Mouse:
         self.middle = Press(info.pt.x, info.pt.y, now, action) if action else None
         # The second press of a double-click: KiCad would zoom to fit. Hide it
         # from KiCad if asked to; our own click action still runs on release.
-        # Windows' double-click metrics are in 96-dpi pixels, the hook's in physical ones.
-        last = self.last_middle
-        second = (last is not None and now - last[0] <= user32.GetDoubleClickTime() / 1000
-                  and abs(info.pt.x - last[1]) <= user32.GetSystemMetrics(SM_CXDOUBLECLK) * dpi_scale
-                  and abs(info.pt.y - last[2]) <= user32.GetSystemMetrics(SM_CYDOUBLECLK) * dpi_scale)
+        second = second_click(self.last_middle, now, info.pt)
         self.last_middle = None if second else (now, info.pt.x, info.pt.y)
         if second and kind and settings.prefs.value["block_middle_double_click"]:
             return self._hide_press(msg)
