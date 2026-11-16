@@ -74,7 +74,8 @@ from winapi import (  # noqa: E402
 # --- timings ---------------------------------------------------------------------
 
 CLICK_SLOP = 10            # a click may move this many (96-dpi) pixels; scaled to the display in main()...
-DRAG_MIN_S = 0.15          # ...and a press only becomes a drag once held this long
+DRAG_MIN_S = 0.15          # ...and a press only becomes a drag once held this long,
+FLICK_SLOP = 40            # unless it moves this many (96-dpi) pixels: a quick pan, however short
 DRAG_SLOP = 3              # KiCad drags a part once the left button moves it this many (96-dpi) pixels
 CLICK_MAX_S = 0.5          # a middle click must be released within this time
 EDGE_INSET = 2             # an absolute pointer is held this many pixels inside the canvas while panning
@@ -119,9 +120,10 @@ Press = collections.namedtuple("Press", "x y t action")
 
 def is_drag(press, pt):
     """Whether a press has turned into a drag now that the mouse is at pt."""
-    slop = CLICK_SLOP * dpi_scale
-    moved = abs(pt.x - press.x) > slop or abs(pt.y - press.y) > slop
-    return moved and time.perf_counter() - press.t >= DRAG_MIN_S
+    dist = max(abs(pt.x - press.x), abs(pt.y - press.y))
+    if dist > FLICK_SLOP * dpi_scale:
+        return True  # moved far: a pan even if the button was only down for a moment
+    return dist > CLICK_SLOP * dpi_scale and time.perf_counter() - press.t >= DRAG_MIN_S
 
 
 def second_click(last, now, pt):
@@ -365,7 +367,9 @@ class Mouse:
         return False
 
     def middle_release(self, msg, info):
-        if self.middle and time.perf_counter() - self.middle.t < CLICK_MAX_S:
+        # The release point too: the hook can miss moves during a quick flick.
+        if (self.middle and time.perf_counter() - self.middle.t < CLICK_MAX_S
+                and not is_drag(self.middle, info.pt)):
             perform(self.middle.action, "middle click", info.pt)
         self.middle = None
         return self._hide_release(msg)
